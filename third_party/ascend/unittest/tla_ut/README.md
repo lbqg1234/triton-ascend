@@ -41,6 +41,10 @@ The default `all` auto-degrades to `ir` when no NPU is available.
   Includes [DSA](kernels/dsa/README.md); IR/compile stages skip runtime tests.
 - `utils/` — shared helpers.
 - `simd_frontend_contract.py` — host-only SIMD frontend contract tests.
+- `simt/` — explicit SIMT scope, pointer ABI and TTIR preservation contracts,
+  plus the `gm_add_one.py` development target. The frontend/adapter IR stage is
+  supported; target compile/run requires NPUIR affinity SIMT module extraction
+  and lowering, which is not yet assembled in the current backend.
 
 ## How to verify
 

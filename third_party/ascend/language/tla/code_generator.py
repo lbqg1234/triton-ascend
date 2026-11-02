@@ -41,14 +41,15 @@ class _SIMDCallerContext:
 
 def handle_scope_with(generator, node):
     """
-    Handle 'with tla.scope.simd()/tla.scope.cube():' by emitting an inline
+    Handle 'with tla.scope.simd()/tla.scope.simt()/tla.scope.cube():' by emitting an inline
     ``scope.scope`` carrying the attributes defined by the scope class
     (``mlir_attrs``); the bishengir HFusion pipeline's outline-scope extracts
-    the marked SIMD scope into the ``func.func`` + ``func.call`` that the HIVM
+    the marked VF scope into the ``func.func`` + ``func.call`` that the HIVM
     stage expects.
 
-    The register ops stay inline (sharing the enclosing function's scope, so
-    buffer handles are used directly, without function-argument remapping).
+    SIMD register ops and SIMT Tensor ops remain in their marked regions.
+    SIMT pointer captures are adapted to internal memref-to-pointer bridges
+    by the TLA adapter before outlining.
     """
     from triton.compiler.code_generator import enter_sub_region
     from .scope import simd

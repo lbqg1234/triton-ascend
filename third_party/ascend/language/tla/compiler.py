@@ -50,7 +50,7 @@ def lower_ttir(module, context, output_dir=None):
 
     A standard inliner prefix in the caller first resolves JIT
     helpers (``tt.func``/``tt.call``) via the Triton inliner interface; TLA
-    SIMD VFs are inline ``scope.scope`` ops at this stage, which the inliner
+    SIMD/SIMT VFs are inline ``scope.scope`` ops at this stage, which the inliner
     does not touch (outline-scope in bishengir extracts them later).
     Callers run ``add_ttir_pipeline`` (Inliner and SymbolDCE) before
     this entry point: ``make_tla_ttir`` at runtime and ``lower_offline`` in
@@ -70,7 +70,9 @@ def lower_ttir(module, context, output_dir=None):
     (``func.func`` entry plus kernel ABI attributes). Scalar GM loads are
     temporarily lowered using the generic scalar-load conversion. This pass
     converts its owned operations rather than rejecting the entire Triton
-    dialect; remaining operations still require downstream support. Core/VF
+    dialect; explicit SIMT scopes retain TTIR and internal GM pointer bridges
+    for later SIMT module extraction. Other operations still require downstream
+    support. Core/VF
     attributes are then inferred from
     explicit scopes and the ttadapter boundary is checked.
     The only stage dumps written are ``00_inline.mlir`` and ``01_linalg.mlir``
@@ -168,13 +170,16 @@ def _infer_tla_kernel_mode(module, context):
     builder.set_op_attr(entry, "hivm.func_core_type", builder.parse_attr(f"#hivm.func_core_type<{core_type}>"))
     builder.set_op_attr(entry, "mix_mode", builder.get_string_attr("aiv" if core_type == "AIV" else "mix"))
     module.set_attr("hivm.module_core_type", builder.parse_attr(f"#hivm.module_core_type<{core_type}>"))
-    # MIX only when a SIMT scope exists; the binding can't read dialect-typed
-    # vf_mode, so match it on the printed scope too.
+    # The entry needs MIX only if a SIMT scope is present. SIMD-only entries
+    # leave the attribute unset; individual VF scopes carry their own mode.
     scopes = []
-    module.walk(scopes.append)
-    has_simt = any(op.get_name() == "scope.scope" and (
-        op.get_str_attr("vector_mode") == "simt" or "#hivm.vf_mode<SIMT>" in str(op)) for op in scopes)
-    if has_simt:
+    module.walk(lambda op: scopes.append(op) if op.get_name() == "scope.scope" else None)
+    has_simt_scope = any(op.get_str_attr("vector_mode") == "simt" for op in scopes)
+    if not has_simt_scope and scopes:
+        # The generic Python operation binding cannot read dialect attributes.
+        # Scope VF modes are printed in the module IR as typed attributes.
+        has_simt_scope = re.search(r"\bhivm\.vf_mode\s*=\s*#hivm\.vf_mode<SIMT>", str(module)) is not None
+    if has_simt_scope:
         builder.set_op_attr(entry, "hivm.vf_mode", builder.parse_attr("#hivm.vf_mode<MIX>"))
 
 
@@ -189,13 +194,28 @@ def check_ttadapter(module):
         raise ValueError("invalid ttadapter module")
     operations = []
     module.walk(operations.append)
-    # Check the entry ABI and operations owned by the adapter, not the whole
-    # Triton dialect. This does not enable SIMT scopes or a Tile lowering path.
+    # Preserve TTIR only within explicitly marked SIMT VFs. Main-module
+    # legality remains scoped to operations owned by this adapter.
+    simt_regions = {
+        op.get_region(0).id()
+        for op in operations
+        if op.get_name() == "scope.scope" and op.get_str_attr("vector_mode") == "simt"
+    }
+
+    def within_simt_scope(op):
+        block = op.get_block()
+        region = block.get_parent() if block is not None else None
+        while region is not None:
+            if region.id() in simt_regions:
+                return True
+            region = region.get_parent_region()
+        return False
+
     converted_ops = {
         "tt.func", "tt.call", "tt.return", "tt.addptr", "tt.ptr_to_int", "tt.get_program_id", "tt.get_num_programs",
         "tt.assert", "tt.load", "tt.clampf"
     }
-    forbidden = [op.get_name() for op in operations if op.get_name() in converted_ops]
+    forbidden = [op.get_name() for op in operations if op.get_name() in converted_ops and not within_simt_scope(op)]
     if forbidden:
         raise ValueError(f"unconverted TLA adapter operations: {forbidden}")
     if any(op.get_name() == "hivm.hir.sync_block" for op in operations):
