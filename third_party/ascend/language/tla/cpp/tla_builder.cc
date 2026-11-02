@@ -481,6 +481,9 @@ Value applySimdMode(TLABuilder &self, Value result, Value mask,
 
 void init_tla_builder(py::module &&m) {
   m.def("lower_tla_sync_all", &lowerTlaSyncAll, py::arg("module"));
+  m.def("tla_builder_for", [](TritonOpBuilder &builder) {
+    return std::make_unique<TLABuilder>(builder.getContext());
+  });
   py::class_<TLABuilder, AscendNPUIROpBuilder>(
       m, "tla_builder", py::module_local(), py::dynamic_attr())
       .def(py::init<MLIRContext *, std::string, std::string>(),
@@ -1351,6 +1354,27 @@ void init_tla_builder(py::module &&m) {
                  *memorySpace == hivm::AddressSpace::GM
                      ? Attribute{}
                      : hivm::AddressSpaceAttr::get(ctx, *memorySpace));
+           })
+      .def("create_tla_simt_pointer",
+           [](TLABuilder &self, Value source, Type pointerType) -> Value {
+             auto memref = dyn_cast<MemRefType>(source.getType());
+             auto pointer = dyn_cast<triton::PointerType>(pointerType);
+             if (!memref || !pointer ||
+                 memref.getElementType() != pointer.getPointeeType())
+               throw std::invalid_argument("TLA SIMT bridge requires matching buffer/pointer elements");
+             SmallVector<int64_t> strides;
+             int64_t offset;
+             if (failed(memref.getStridesAndOffset(strides, offset)) || offset != 0)
+               throw std::invalid_argument(
+                   "TLA SIMT pointer requires a root Buffer with logical offset zero");
+             auto space = hivm::getOptionalHIVMAddressSpace(memref);
+             unsigned addressSpace = space == hivm::AddressSpace::UB ? 6 : 1;
+             if ((space && space != hivm::AddressSpace::UB &&
+                  space != hivm::AddressSpace::GM) ||
+                 pointer.getAddressSpace() != addressSpace)
+               throw std::invalid_argument("TLA SIMT pointer address space must match GM/UB Buffer");
+             return self.create<UnrealizedConversionCastOp>(pointerType, source)
+                 .getResult(0);
            })
       .def("create_tla_alloc",
            [](TLABuilder &self, Type type) -> Value {

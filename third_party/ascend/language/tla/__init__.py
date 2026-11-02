@@ -27,7 +27,7 @@ from the TLA repo's SIMD VF additions.  It does **not** reuse the existing
 Exports: ``alloc_buffer``/``alloc`` (on-chip buffer + versions),
 ``fill`` (scalar fill of a contiguous UB buffer),
 ``copy`` (GM<->buffer), ``view`` (GM view), ``scope`` (core-mode scopes:
-``tla.scope.simd()`` / ``tla.scope.cube()``),
+``tla.scope.simd()`` / ``tla.scope.simt()`` / ``tla.scope.cube()``),
 ``simd`` (vector-register ops), ``where`` (eager scalar/SIMD select),
 ``annotate_buffer_versions``, and scalar dtypes.
 
@@ -69,6 +69,7 @@ from triton.language.core import (
 
 from .core import AddressSpace, buffer, buffer_type, vector, vector_type
 from .scope import scope
+from . import simt
 from .alloc import alloc_buffer, alloc
 from .fill import fill
 from .copy import copy
@@ -234,6 +235,7 @@ __all__ = [
 
     # simd ops
     "simd",
+    "simt",
 
     # scalar / SIMD selection
     "where",

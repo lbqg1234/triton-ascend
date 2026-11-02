@@ -17,21 +17,22 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Core-mode scopes for TLA (``with tla.scope.simd():``).
+"""Core and vector-function scopes for TLA.
 
 A scope marks a block of ops (``simd.*`` on the vector core) that the compiler
 emits as an inline ``scope.scope`` carrying the core-mode markers; the
 bishengir ``outline-scope`` pass extracts marked SIMD scopes into the
 ``func.func`` + ``func.call`` that the HIVM stage consumes.
 
-``tla.scope.vector()``, ``tla.scope.simd()`` and ``tla.scope.cube()`` are the
-entry points; each is a context-manager class (the core mode is fixed on the
-class), so the compiler dispatch table keys off the class object itself. Each
+``tla.scope.vector()``, ``tla.scope.simd()``, ``tla.scope.simt()`` and
+``tla.scope.cube()`` are the entry points; each is a context-manager class
+(the core mode is fixed on the class), so the compiler dispatch table keys off
+the class object itself. Each
 class defines ``mlir_attrs``, the attribute set stamped on the emitted
 ``scope.scope``.
 """
 
-__all__ = ["scope", "vector", "simd", "cube"]
+__all__ = ["scope", "vector", "simd", "simt", "cube"]
 
 
 def _check_not_in_simd(name, semantic):
@@ -101,6 +102,30 @@ class simd(scope):
         return attrs
 
 
+class simt(scope):
+    """Mark a tile-level SIMT VF on the Vector core.
+
+    Use standard Triton Tensor operations and ``tl.load/store`` for GM access.
+    TTIR is preserved for subsequent SIMT module extraction; target compilation
+    requires an NPUIR affinity pipeline with SIMT VF lowering support.
+    """
+
+    core_mode = "vector"
+    vf_mode = "simt"
+
+    @classmethod
+    def mlir_attrs(cls, builder):
+        attrs = super().mlir_attrs(builder)
+        attrs.update({
+            "no_inline": builder.get_unit_attr(),
+            "outline": builder.get_unit_attr(),
+            "vector_mode": builder.get_string_attr("simt"),
+            "hivm.func_core_type": builder.parse_attr("#hivm.func_core_type<AIV>"),
+            "hivm.vf_mode": builder.parse_attr("#hivm.vf_mode<SIMT>"),
+        })
+        return attrs
+
+
 class cube(scope):
     """Selects the Cube core (AIC) for a region in a ``@tla.jit`` kernel.
 
@@ -133,4 +158,5 @@ class cube(scope):
 # ``tla.scope`` resolves as the namespace holding the fixed-core-mode classes.
 scope.vector = vector
 scope.simd = simd
+scope.simt = simt
 scope.cube = cube

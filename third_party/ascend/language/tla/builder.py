@@ -32,7 +32,16 @@ __all__ = [
     "create_builder_method_wrapper",
     "attach_builder_methods",
     "setup_unified_builder",
+    "ensure_tla_builder",
 ]
+
+
+def ensure_tla_builder(main_builder):
+    """Mount TLA methods on helper builders before type serialization."""
+    if not hasattr(main_builder, "create_tla_buffer_type"):
+        from triton._C.libtriton.ascend import ir as ascend_ir
+
+        setup_unified_builder(main_builder, ascend_ir.tla_builder_for(main_builder))
 
 
 def setup_unified_builder(main_builder, ascend_builder):
@@ -54,6 +63,7 @@ def setup_unified_builder(main_builder, ascend_builder):
         'create_tla_mutex_lock',
         'create_tla_mutex_unlock',
         'create_tla_buffer_type',
+        'create_tla_simt_pointer',
         'create_tla_vector_type',
         'create_tla_alloc',
         'create_tla_fill',

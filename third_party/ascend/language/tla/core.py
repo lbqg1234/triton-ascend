@@ -145,6 +145,9 @@ class buffer_type(tl.base_type):
         self.offset = offset  # None denotes a dynamic subview offset.
 
     def to_ir(self, builder):
+        from .builder import ensure_tla_builder
+
+        ensure_tla_builder(builder)
         return builder.create_tla_buffer_type(list(self.shape), self.element_ty.to_ir(builder), self.space,
                                               list(self.strides), self.offset)
 
