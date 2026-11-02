@@ -41,6 +41,17 @@ The default `all` auto-degrades to `ir` when no NPU is available.
   Includes [DSA](kernels/dsa/README.md); IR/compile stages skip runtime tests.
 - `utils/` — shared helpers.
 - `simd_frontend_contract.py` — host-only SIMD frontend contract tests.
+- `simt/` — explicit SIMT scope, pointer ABI and TTIR preservation contracts,
+  plus `to_ptr.py` for target compilation and device accuracy.
+  `tla.simt.to_ptr` accepts UB Buffers defined outside the VF with known
+  zero offset and identity layout, returning an address-space-6 pointer.
+  Non-identity layouts are rejected without further stride analysis. Compute
+  offsets/strides inside the VF and use standard `tl.load/store`.
+  Contiguous zero-offset reshapes are accepted. Subview offsets are currently
+  recorded as unknown and rejected. GM kernel
+  pointers can be used directly. Convert the root Buffer in the kernel before
+  passing the pointer to a standard Triton helper; generic TLA helper-builder
+  initialization is outside this SIMT change. Target compile/run needs affinity SIMT lowering.
 
 ## How to verify
 

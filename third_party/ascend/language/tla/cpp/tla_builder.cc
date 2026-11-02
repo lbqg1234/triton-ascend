@@ -1586,6 +1586,11 @@ void init_tla_builder(py::module &&m) {
                      ? Attribute{}
                      : hivm::AddressSpaceAttr::get(ctx, *memorySpace));
            })
+      .def("create_tla_simt_pointer",
+           [](TLABuilder &self, Value source, Type pointerType) -> Value {
+             return self.create<UnrealizedConversionCastOp>(pointerType, source)
+                 .getResult(0);
+           })
       .def("create_tla_alloc",
            [](TLABuilder &self, Type type) -> Value {
              auto memrefType = dyn_cast<MemRefType>(type);

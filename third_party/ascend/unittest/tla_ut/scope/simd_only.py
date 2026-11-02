@@ -42,6 +42,7 @@ def test_ir(output_dir=None):
                      extra=("hivm.vector_function", "hivm.vf_mode<SIMD>", "hivm.func_core_type<AIV>"))
     assert text.count("hivm.vector_function") == 1, "standalone simd scope is one VF"
     assert 'mix_mode = "aiv"' in text
+    assert 'parallel_mode = "simd"' in text
     print("IR PASS: simd_only (standalone simd scope)")
 
 

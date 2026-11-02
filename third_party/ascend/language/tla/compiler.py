@@ -60,7 +60,7 @@ def lower_for_backend(module, options):
 
 
 def lower_ttir(module, context, output_dir=None):
-    """Lower an inlined TLA TTIR module in place and return it."""
+    """Lower inlined TLA TTIR, preserving explicit SIMT VFs for the backend."""
     from triton._C.libtriton import ir
     from triton._C.libtriton import passes
     from triton._C.libtriton import ascend as ascend_binding
@@ -135,6 +135,14 @@ def infer_func_core_type(module):
     return None
 
 
+def _has_simt_scope(module, operations):
+    scopes = [op for op in operations if op.get_name() == "scope.scope"]
+    if any(op.get_str_attr("vector_mode") == "simt" for op in scopes):
+        return True
+    # The generic Python operation binding cannot read dialect attributes.
+    return bool(scopes) and re.search(r"\bhivm\.vf_mode\s*=\s*#hivm\.vf_mode<SIMT>", str(module)) is not None
+
+
 def _infer_tla_kernel_mode(module, context):
     """Stamp the entry core type, launch mode and VF mode on the kernel entry."""
     from triton._C.libtriton.ascend import ir as ascend_ir
@@ -150,14 +158,12 @@ def _infer_tla_kernel_mode(module, context):
     builder.set_op_attr(entry, "hivm.func_core_type", builder.parse_attr(f"#hivm.func_core_type<{core_type}>"))
     builder.set_op_attr(entry, "mix_mode", builder.get_string_attr("aiv" if core_type == "AIV" else "mix"))
     module.set_attr("hivm.module_core_type", builder.parse_attr(f"#hivm.module_core_type<{core_type}>"))
-    # MIX only when a SIMT scope exists; the binding can't read dialect-typed
-    # vf_mode, so match it on the printed scope too.
-    scopes = []
-    module.walk(scopes.append)
-    has_simt = any(op.get_name() == "scope.scope" and (
-        op.get_str_attr("vector_mode") == "simt" or "#hivm.vf_mode<SIMT>" in str(op)) for op in scopes)
-    if has_simt:
+    operations = []
+    module.walk(operations.append)
+    if _has_simt_scope(module, operations):
         builder.set_op_attr(entry, "hivm.vf_mode", builder.parse_attr("#hivm.vf_mode<MIX>"))
+        # The host launcher uses parallel_mode to configure dynamic UB for SIMT.
+        builder.set_op_attr(entry, "parallel_mode", builder.get_string_attr("mix_simd_simt"))
 
 
 def check_ttadapter(module):
@@ -171,13 +177,28 @@ def check_ttadapter(module):
         raise ValueError("invalid ttadapter module")
     operations = []
     module.walk(operations.append)
-    # Check the entry ABI and operations owned by the adapter, not the whole
-    # Triton dialect. This does not enable SIMT scopes or a Tile lowering path.
+    # Preserve TTIR only within explicitly marked SIMT VFs. Main-module
+    # legality remains scoped to operations owned by this adapter.
+    simt_regions = {
+        op.get_region(0).id()
+        for op in operations
+        if op.get_name() == "scope.scope" and op.get_str_attr("vector_mode") == "simt"
+    }
+
+    def within_simt_scope(op):
+        block = op.get_block()
+        region = block.get_parent() if block is not None else None
+        while region is not None:
+            if region.id() in simt_regions:
+                return True
+            region = region.get_parent_region()
+        return False
+
     converted_ops = {
         "tt.func", "tt.call", "tt.return", "tt.addptr", "tt.ptr_to_int", "tt.get_program_id", "tt.get_num_programs",
         "tt.assert", "tt.load", "tt.store", "tt.clampf"
     }
-    forbidden = [op.get_name() for op in operations if op.get_name() in converted_ops]
+    forbidden = [op.get_name() for op in operations if op.get_name() in converted_ops and not within_simt_scope(op)]
     if forbidden:
         raise ValueError(f"unconverted TLA adapter operations: {forbidden}")
     if any(op.get_name() == "hivm.hir.sync_block" for op in operations):
@@ -186,7 +207,8 @@ def check_ttadapter(module):
     if len(entries) != 1:
         raise ValueError("expected exactly one public func.func kernel entry")
     entry = entries[0]
-    for key, value in (("global_kernel", "local"), ("parallel_mode", "simd")):
+    parallel_mode = "mix_simd_simt" if _has_simt_scope(module, operations) else "simd"
+    for key, value in (("global_kernel", "local"), ("parallel_mode", parallel_mode)):
         if entry.get_str_attr(key) != value:
             raise ValueError(f"kernel entry must have {key} = {value!r}")
     mix = entry.get_str_attr("mix_mode")

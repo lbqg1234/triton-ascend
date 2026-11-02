@@ -48,7 +48,7 @@ class _TLACallerContext:
 
 
 def handle_scope_with(generator, node):
-    """Emit the core scope inline and inherit its mode in JIT helpers."""
+    """Emit a core/VF scope inline, preserving pipeline tasks and helper modes."""
     item, = node.items
     if item.optional_vars is not None:
         raise ValueError("TLA scopes do not support 'as' bindings")
