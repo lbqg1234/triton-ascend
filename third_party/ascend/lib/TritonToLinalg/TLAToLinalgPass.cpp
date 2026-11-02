@@ -25,6 +25,7 @@
 #include "ascend/include/TritonToLinalg/LoadStoreConverter.h"
 #include "ascend/include/TritonToLinalg/TritonOpConverter.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/Scope/IR/Scope.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -36,6 +37,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -43,10 +45,115 @@ using namespace mlir;
 
 namespace {
 
+static bool isTLASimtScope(scope::ScopeOp scopeOp) {
+  auto mode = scopeOp->getAttrOfType<hivm::VFModeAttr>("hivm.vf_mode");
+  auto vectorMode = scopeOp->getAttrOfType<StringAttr>("vector_mode");
+  return mode && mode.getValue() == hivm::VFMode::SIMT && vectorMode &&
+         vectorMode.getValue() == "simt";
+}
+
+static scope::ScopeOp getTLASimtScope(Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp())
+    if (auto scopeOp = dyn_cast<scope::ScopeOp>(parent))
+      if (isTLASimtScope(scopeOp))
+        return scopeOp;
+  return {};
+}
+
+// Signature conversion and explicit Buffer access both use pointer bridges.
+// Localize them by use so outlining captures memrefs rather than pointers.
+static LogicalResult localizeSimtPointerBridges(ModuleOp module) {
+  SmallVector<UnrealizedConversionCastOp> bridges;
+  WalkResult collected = module.walk([&](UnrealizedConversionCastOp bridge) {
+    if (bridge.getInputs().size() != 1 || bridge.getNumResults() != 1 ||
+        !isa<MemRefType>(bridge.getInputs().front().getType()) ||
+        !isa<triton::PointerType>(bridge.getResult(0).getType())) {
+      bridge.emitError("TLA requires a one-to-one memref-to-pointer bridge");
+      return WalkResult::interrupt();
+    }
+    auto memref = cast<MemRefType>(bridge.getInputs().front().getType());
+    // Identity layout guarantees zero offset and contiguous row-major data.
+    if (!memref.getLayout().isIdentity()) {
+      bridge.emitError(
+          "TLA SIMT pointer bridge requires a zero-offset identity layout");
+      return WalkResult::interrupt();
+    }
+    if (!getTLASimtScope(bridge))
+      bridges.push_back(bridge);
+    return WalkResult::advance();
+  });
+  if (collected.wasInterrupted())
+    return failure();
+
+  for (auto bridge : bridges) {
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : bridge.getResult(0).getUses())
+      uses.push_back(&use);
+    DenseMap<Operation *, Value> scopeBridges;
+    for (OpOperand *use : uses) {
+      auto scopeOp = getTLASimtScope(use->getOwner());
+      if (!scopeOp)
+        continue;
+      Value &local = scopeBridges[scopeOp.getOperation()];
+      if (!local) {
+        OpBuilder builder(&scopeOp.getRegion().front(),
+                          scopeOp.getRegion().front().begin());
+        local = builder
+                    .create<UnrealizedConversionCastOp>(
+                        bridge.getLoc(), bridge.getResult(0).getType(),
+                        bridge.getInputs())
+                    .getResult(0);
+      }
+      use->set(local);
+    }
+    if (!bridge.getResult(0).use_empty())
+      return bridge.emitError("TLA conversion bridge remains outside SIMT VF");
+    bridge.erase();
+  }
+  return success();
+}
+
+static LogicalResult verifySimtTensorCaptures(ModuleOp module) {
+  WalkResult result = module.walk([&](Operation *op) -> WalkResult {
+    auto scopeOp = getTLASimtScope(op);
+    if (!scopeOp)
+      return WalkResult::advance();
+    for (Value operand : op->getOperands()) {
+      if (!isa<TensorType>(operand.getType()))
+        continue;
+      Operation *def = operand.getDefiningOp();
+      if (scopeOp.getRegion().isAncestor(operand.getParentRegion()) ||
+          isa_and_nonnull<arith::ConstantOp>(def))
+        continue;
+      op->emitError("TLA SIMT VF cannot capture a non-constant Tensor; "
+                    "compute it inside the SIMT scope");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
 class TLATypeConverter final : public TypeConverter {
 public:
   TLATypeConverter() {
     addConversion([](Type type) { return type; });
+    addSourceMaterialization([](OpBuilder &builder, triton::PointerType pointer,
+                                ValueRange inputs, Location loc) -> Value {
+      if (inputs.size() != 1)
+        return {};
+      Type element = pointer.getPointeeType();
+      if (isa<triton::PointerType, ShapedType>(element))
+        return {};
+      if (element.isInteger(1))
+        element = builder.getI8Type();
+      if (inputs.front().getType() !=
+          MemRefType::get({ShapedType::kDynamic}, element))
+        return {};
+      return builder.create<UnrealizedConversionCastOp>(loc, pointer, inputs)
+          .getResult(0);
+    });
     addConversion([](triton::PointerType pointer) -> Type {
       Type elementType = pointer.getPointeeType();
       if (isa<triton::PointerType, ShapedType>(elementType))
@@ -248,8 +355,9 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, func::FuncDialect, hivm::HIVMDialect,
-                    memref::MemRefDialect, scf::SCFDialect>();
+    registry
+        .insert<arith::ArithDialect, func::FuncDialect, hivm::HIVMDialect,
+                memref::MemRefDialect, scf::SCFDialect, scope::ScopeDialect>();
   }
 
   void runOnOperation() override {
@@ -286,25 +394,36 @@ public:
         &getContext());
 
     ConversionTarget target(getContext());
+    target.addDynamicallyLegalOp<scope::ScopeOp>(
+        [&](scope::ScopeOp scopeOp) { return typeConverter.isLegal(scopeOp); });
+    target.markOpRecursivelyLegal<scope::ScopeOp>(isTLASimtScope);
     // Convert only the operations owned by this pass, not the entire Triton
-    // dialect. Other pointer-free operations may be handled by later stages;
-    // this does not introduce SIMT scope support or a generic Tile pipeline.
+    // dialect. Other pointer-free operations may be handled by later stages.
+    // Explicit SIMT scope bodies are preserved for their own lowering pipeline.
     target.addIllegalOp<triton::FuncOp, triton::ReturnOp, triton::AddPtrOp,
                         triton::PtrToIntOp, triton::GetProgramIdOp,
                         triton::GetNumProgramsOp, triton::AssertOp,
                         triton::LoadOp, triton::MakeTensorPtrOp,
                         triton::BitcastOp, triton::ClampFOp>();
     target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
-        [&](Operation *op) {
-          return !op->hasAttr("tla.gm_view") && typeConverter.isLegal(op);
+        [&](UnrealizedConversionCastOp cast) {
+          return !cast->hasAttr("tla.gm_view") &&
+                 (typeConverter.isLegal(cast) ||
+                  (cast.getInputs().size() == 1 && cast.getNumResults() == 1 &&
+                   isa<MemRefType>(cast.getInputs().front().getType()) &&
+                   isa<triton::PointerType>(cast.getResult(0).getType())));
         });
-    // Unsupported pointer uses still need a conversion. No pointer source
-    // materialization is provided, so entry pointers cannot leak through.
+    // Unsupported main-module pointer uses still need a conversion.
     target.markUnknownOpDynamicallyLegal(
         [&](Operation *op) { return typeConverter.isLegal(op); });
     if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       module.emitError(
           "unsupported TTIR or pointer use in TLA affinity module");
+      signalPassFailure();
+      return;
+    }
+    if (failed(localizeSimtPointerBridges(module)) ||
+        failed(verifySimtTensorCaptures(module))) {
       signalPassFailure();
       return;
     }
