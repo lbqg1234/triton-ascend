@@ -24,6 +24,21 @@ Ascend-specific code generation handlers for 'with' statement context managers.
 __all__ = ["handle_scope_with"]
 
 
+class _SIMDCallerContext:
+    """Keep helper specializations and scalar checks specific to SIMD callers."""
+
+    def __init__(self, parent):
+        self.parent = parent
+
+    def mangle(self):
+        return (self.parent.mangle() if self.parent is not None else "") + "_tla_simd"
+
+    def initialize_callee(self, function, builder):
+        if self.parent is not None:
+            self.parent.initialize_callee(function, builder)
+        builder._tla_in_simd = True
+
+
 def handle_scope_with(generator, node):
     """
     Handle 'with tla.scope.simd()/tla.scope.cube():' by emitting an inline
@@ -36,17 +51,27 @@ def handle_scope_with(generator, node):
     buffer handles are used directly, without function-argument remapping).
     """
     from triton.compiler.code_generator import enter_sub_region
+    from .scope import simd
 
     context_expr = node.items[0].context_expr
     withitem_class = generator.visit(context_expr.func)
 
-    with enter_sub_region(generator):
-        attrs = withitem_class.mlir_attrs(generator.builder)
-        scope_op = generator.builder.create_scope_op(attrs, [])
-        body = generator.builder.get_scope_entry_block(scope_op)
-        generator.builder.set_insertion_point_to_start(body)
-        generator.visit_compound_statement(node.body)
-        generator.builder.set_insertion_point_to_end(body)
-        if not body.has_terminator():
-            generator.builder.scope_return([])
+    previous_context = generator.caller_context
+    previous_simd = getattr(generator.builder, "_tla_in_simd", False)
+    if withitem_class is simd:
+        generator.caller_context = _SIMDCallerContext(previous_context)
+        generator.builder._tla_in_simd = True
+    try:
+        with enter_sub_region(generator):
+            attrs = withitem_class.mlir_attrs(generator.builder)
+            scope_op = generator.builder.create_scope_op(attrs, [])
+            body = generator.builder.get_scope_entry_block(scope_op)
+            generator.builder.set_insertion_point_to_start(body)
+            generator.visit_compound_statement(node.body)
+            generator.builder.set_insertion_point_to_end(body)
+            if not body.has_terminator():
+                generator.builder.scope_return([])
+    finally:
+        generator.caller_context = previous_context
+        generator.builder._tla_in_simd = previous_simd
     return None
