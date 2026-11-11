@@ -236,7 +236,11 @@ def _finalize_program_launch_policy(metadata, opt):
             raise RuntimeError("persistent program-grid transform lacks coverage/ABI verification")
         ptsm_cap_authorized = True
 
-    if opt.is_pure_simt:
+    if getattr(opt, "enable_tla_mode", False):
+        # Affinity programs own their program loops; keep the launcher from
+        # capping the grid when the compiler does not run AutoBlockify.
+        auto_blockify_enabled = False
+    elif opt.is_pure_simt:
         auto_blockify_enabled = _is_auto_map_parallel_blocks_enabled() and not row_coalescing_applied
     else:
         auto_blockify_enabled = (_is_auto_map_parallel_blocks_enabled() and not has_auto_blockify_blacklist_op
@@ -752,6 +756,220 @@ def try_compile_with_config(linalg: str, ub_config: Dict[str, Any], metadata: di
         return (False, str(e))
 
 
+def _get_bishengir_compile_options_910_95(metadata, opt, npu_compiler_path):
+    _compile_option_list = get_common_bishengir_compile_options(metadata)
+    if getattr(opt, "enable_tla_mode", False):
+        _compile_option_list += ["--enable-triton-kernel-compile=true", "--enable-tla-mode=true"]
+        if force_disable_ffts(opt.target_arch):
+            _compile_option_list.append("--disable-ffts")
+        if _is_ascend_sanitizer_enabled():
+            _compile_option_list.append("--enable-sanitizer=true")
+        if not _is_debug_line_info_disabled():
+            _compile_option_list.append("--enable-debug-info=true")
+        if _enable_msdebug():
+            _compile_option_list.append("--enable-debug-variables=true")
+        if _enable_print_ub_bits():
+            _compile_option_list.append("--enable-print-memory-allocated-size")
+        # The shared Ascend950 target has no default core counts.
+        has_limit, aic, aiv = NPUUtils().get_device_limit()
+        if _is_a5_target_arch(metadata["target"].arch) or has_limit:
+            _compile_option_list += [f"--custom-aic-number={aic}", f"--custom-aiv-number={aiv}"]
+        for key, option in (
+            ("unit_flag", "enable-hivm-unit-flag-sync"),
+            ("inject_barrier_all", "enable-hivm-inject-barrier-all-sync"),
+            ("plan_memory_strategy", "plan-memory-strategy"),
+        ):
+            value = metadata.get(key)
+            if value is not None:
+                _compile_option_list.append(f"--{option}={value}")
+        if metadata.get("enable_vf_stack_limit"):
+            _compile_option_list.append("--enable-vf-stack-limit")
+        for bitcode in metadata.get("bitcodes") or ():
+            _compile_option_list.append(f"--link-aicore-bitcode={bitcode}")
+        # NPUOptions selects libdevice for the architecture, as for Triton.
+        bisheng_options = metadata.get("bisheng_options")
+        if bisheng_options is not None:
+            _compile_option_list.append(f"--append-bisheng-options={bisheng_options}")
+        return _compile_option_list
+
+    multibuffer_mode = metadata.get("multibuffer_mode")
+    if multibuffer_mode is not None:
+        mode_arg = "[" + ",".join(f"({level},{count})" for level, count in multibuffer_mode) + "]"
+        _compile_option_list.append(f"--multibuffer-mode={mode_arg}")
+
+    multibuffer = metadata.get("multibuffer")
+    num_stages = metadata.get("num_stages")
+
+    if multibuffer is not None or num_stages is not None:
+        multi_buffer_value = True
+        if multibuffer is not None and not multibuffer:
+            multi_buffer_value = False
+        elif num_stages is not None and num_stages == 1:
+            multi_buffer_value = False
+        _compile_option_list += [
+            f"--enable-auto-multi-buffer={multi_buffer_value}",
+        ]
+
+    vf_fusion_mode = metadata["vf_fusion_mode"]
+    if vf_fusion_mode is not None:
+        _compile_option_list += [
+            f"--vf-fusion-mode={vf_fusion_mode}",
+        ]
+
+    enable_preload = metadata["enable_preload"]
+    if enable_preload is not None:
+        _compile_option_list += [
+            f"--enable-preload={enable_preload}",
+        ]
+
+    disable_tightly_coupled_buffer_reuse = metadata["disable_tightly_coupled_buffer_reuse"]
+    if disable_tightly_coupled_buffer_reuse:
+        _compile_option_list += ["--disable-tightly-coupled-buffer-reuse"]
+
+    _compile_option_list += [
+        f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
+    ]
+
+    _compile_option_list += [f"--enable-optimized-metaop={is_cann_version_at_least(9, 2, 0)}"]
+
+    has_limit, aic, aiv = NPUUtils().get_device_limit()
+    if _is_a5_target_arch(metadata["target"].arch) or has_limit:
+        _compile_option_list += [
+            f"--custom-aic-number={aic}",
+        ]
+        _compile_option_list += [
+            f"--custom-aiv-number={aiv}",
+        ]
+
+    if force_disable_ffts(opt.target_arch):
+        _compile_option_list += ["--disable-ffts"]
+    if _is_ascend_sanitizer_enabled():
+        _compile_option_list += ["--enable-sanitizer=true"]
+    if not _is_debug_line_info_disabled():
+        _compile_option_list += ["--enable-debug-info=true"]
+    if _enable_msdebug():
+        _compile_option_list += ["--enable-debug-variables=true"]
+    if _enable_print_ub_bits():
+        _compile_option_list += ["--enable-print-memory-allocated-size"]
+
+    enable_hivm_auto_cv_balance = metadata["enable_hivm_auto_cv_balance"]
+    if enable_hivm_auto_cv_balance is not None:
+        _compile_option_list += \
+            [f"--enable-hivm-auto-cv-balance={enable_hivm_auto_cv_balance}"]
+
+    sync_solver = metadata["sync_solver"]
+    if sync_solver is not None:
+        _compile_option_list += \
+            [f"--enable-hivm-graph-sync-solver={sync_solver}"]
+
+    unit_flag = metadata["unit_flag"]
+    if unit_flag is not None:
+        _compile_option_list += \
+            [f"--enable-hivm-unit-flag-sync={unit_flag}"]
+
+    inject_barrier_all = metadata["inject_barrier_all"]
+    if inject_barrier_all is not None:
+        _compile_option_list += \
+            [f"--enable-hivm-inject-barrier-all-sync={inject_barrier_all}"]
+
+    inject_block_all = metadata["inject_block_all"]
+    if inject_block_all is not None:
+        _compile_option_list += \
+            [f"--enable-hivm-inject-block-all-sync={inject_block_all}"]
+
+    limit_auto_multi_buffer_only_for_local_buffer = metadata["limit_auto_multi_buffer_only_for_local_buffer"]
+    if limit_auto_multi_buffer_only_for_local_buffer is not None:
+        _compile_option_list += \
+            [f"--limit-auto-multi-buffer-only-for-local-buffer={limit_auto_multi_buffer_only_for_local_buffer}"]
+
+    set_workspace_multibuffer = metadata["set_workspace_multibuffer"]
+    if set_workspace_multibuffer is not None:
+        _compile_option_list += \
+            [f"--set-workspace-multibuffer={set_workspace_multibuffer}"]
+
+    auto_multi_buffer = metadata["limit_auto_multi_buffer_of_local_buffer"]
+    if auto_multi_buffer is None:
+        auto_multi_buffer = "no-limit"
+    _compile_option_list += \
+        [f"--limit-auto-multi-buffer-of-local-buffer={auto_multi_buffer}"]
+    auto_multi_buffer_buffer = metadata["limit_auto_multi_buffer_buffer"]
+    if auto_multi_buffer_buffer is not None:
+        _compile_option_list += \
+            [f"--limit-auto-multi-buffer-buffer={auto_multi_buffer_buffer}"]
+
+    enable_mixed_cv = metadata["enable_mixed_cv"]
+    if enable_mixed_cv is not None:
+        _compile_option_list += \
+            [f"--enable-mixed-cv={enable_mixed_cv}"]
+
+    enable_dynamic_cv_pipeline = metadata["enable_dynamic_cv_pipeline"]
+    if (enable_dynamic_cv_pipeline == True
+            and _is_a5_target_arch(metadata.get("target_arch", metadata.get("arch", "")))
+            and not metadata.get("disable_vf_operand_substitution", False)):
+        _compile_option_list += [f"--enable-vf-operand-substitution=True"]
+
+    enable_flatten = metadata["enable_flatten"]
+    if enable_flatten is not None:
+        _compile_option_list += \
+            [f"--enable-flatten={enable_flatten}"]
+
+    enable_auto_vectorize_v2 = metadata["enable_auto_vectorize_v2"]
+    if enable_auto_vectorize_v2 is not None:
+        _compile_option_list += \
+            [f"--enable-auto-vectorize-v2={enable_auto_vectorize_v2}"]
+    auto_vectorize_v2_max_fused_ops_num = metadata["auto_vectorize_v2_max_fused_ops_num"]
+    if auto_vectorize_v2_max_fused_ops_num is not None:
+        _compile_option_list += \
+            [f"--hfusion-max-fused-ops-in-auto-vectorize-v2={auto_vectorize_v2_max_fused_ops_num}"]
+    prevec_max_fused_ops_num = metadata["prevec_max_fused_ops_num"]
+    if prevec_max_fused_ops_num is not None:
+        _compile_option_list += \
+            [f"--hfusion-max-fused-elementwise-ops={prevec_max_fused_ops_num}"]
+
+    disable_auto_inject_block_sync = metadata["disable_auto_inject_block_sync"]
+    if disable_auto_inject_block_sync is not None:
+        _compile_option_list += \
+            [f"--disable-auto-inject-block-sync={disable_auto_inject_block_sync}"]
+
+    bitcodes = metadata["bitcodes"]
+    if bitcodes is not None:
+        for bitcode in bitcodes:
+            _compile_option_list += \
+                [f"--link-aicore-bitcode={bitcode}"]
+
+    if metadata["auto_blockify_enabled"]:
+        _compile_option_list += ["--enable-auto-blockify-loop"]
+    if npu_compiler_path.endswith("bishengir-compile"):
+        _compile_option_list += [
+            "--enable-hfusion-compile=true",
+            "--enable-triton-kernel-compile=true",
+        ]
+        _compile_option_list += _full_row_copy_compile_options(metadata, npu_compiler_path)
+        # Temporary until the NPU compiler enables batch matmul by default in Q4.
+        if metadata.get("enable_hivm_batch_matmul"):
+            _compile_option_list += ["--enable-hivm-batch-matmul"]
+        if metadata.get("enable_vf_stack_limit"):
+            _compile_option_list += ["--enable-vf-stack-limit"]
+    bisheng_options = metadata["bisheng_options"]
+    if bisheng_options is not None:
+        _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
+    vf_merge_level = metadata["vf_merge_level"]
+    if vf_merge_level is not None:
+        _compile_option_list += [f"--enable-vf-merge-level={vf_merge_level}"]
+
+    hfusion_enable_multiple_consumer_fusion = metadata["hfusion_enable_multiple_consumer_fusion"]
+    if hfusion_enable_multiple_consumer_fusion is not None:
+        _compile_option_list += [
+            f"--hfusion-enable-multiple-consumer-fusion={hfusion_enable_multiple_consumer_fusion}"
+        ]
+
+    plan_memory_strategy = metadata["plan_memory_strategy"]
+    if plan_memory_strategy is not None:
+        _compile_option_list += [f"--plan-memory-strategy={plan_memory_strategy}"]
+
+    return _compile_option_list
+
+
 def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
     linalg, metadata = _parse_linalg_metadata(linalg, metadata)
     _finalize_program_launch_policy(metadata, opt)
@@ -766,195 +984,15 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
             bin_file_with_ext = "kernel_reloc.o"
         bin_path = os.path.join(tmpdir, bin_file_with_ext)
         callback_path = os.path.join(tmpdir, "libkernel.so")
-        _compile_option_list = get_common_bishengir_compile_options(metadata)
+        npu_compiler_path, env = _get_npucompiler_path()
+        _compile_option_list = _get_bishengir_compile_options_910_95(metadata, opt, npu_compiler_path)
         proton_metadata_path = None
         if metadata.get("proton_collection") == "mspti":
             proton_metadata_path = Path(tmpdir) / "proton_metadata.json"
             _compile_option_list.append(f"--proton-metadata-output={proton_metadata_path}")
 
-        multibuffer_mode = metadata.get("multibuffer_mode")
-        if multibuffer_mode is not None:
-            mode_arg = "[" + ",".join(f"({level},{count})" for level, count in multibuffer_mode) + "]"
-            _compile_option_list.append(f"--multibuffer-mode={mode_arg}")
-
-        multibuffer = metadata.get("multibuffer")
-        num_stages = metadata.get("num_stages")
-
-        if multibuffer is not None or num_stages is not None:
-            multi_buffer_value = True
-            if multibuffer is not None and not multibuffer:
-                multi_buffer_value = False
-            elif num_stages is not None and num_stages == 1:
-                multi_buffer_value = False
-            _compile_option_list += [
-                f"--enable-auto-multi-buffer={multi_buffer_value}",
-            ]
-
-        vf_fusion_mode = metadata["vf_fusion_mode"]
-        if vf_fusion_mode is not None:
-            _compile_option_list += [
-                f"--vf-fusion-mode={vf_fusion_mode}",
-            ]
-
-        enable_preload = metadata["enable_preload"]
-        if enable_preload is not None:
-            _compile_option_list += [
-                f"--enable-preload={enable_preload}",
-            ]
-
-        disable_tightly_coupled_buffer_reuse = metadata["disable_tightly_coupled_buffer_reuse"]
-        if disable_tightly_coupled_buffer_reuse:
-            _compile_option_list += ["--disable-tightly-coupled-buffer-reuse"]
-
-        _compile_option_list += [
-            f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
-        ]
-
-        _compile_option_list += [f"--enable-optimized-metaop={is_cann_version_at_least(9, 2, 0)}"]
-
-        has_limit, aic, aiv = NPUUtils().get_device_limit()
-        if _is_a5_target_arch(metadata["target"].arch) or has_limit:
-            _compile_option_list += [
-                f"--custom-aic-number={aic}",
-            ]
-            _compile_option_list += [
-                f"--custom-aiv-number={aiv}",
-            ]
-
-        if force_disable_ffts(opt.target_arch):
-            _compile_option_list += ["--disable-ffts"]
-        if _is_ascend_sanitizer_enabled():
-            _compile_option_list += ["--enable-sanitizer=true"]
-        if not _is_debug_line_info_disabled():
-            _compile_option_list += ["--enable-debug-info=true"]
-        if _enable_msdebug():
-            _compile_option_list += ["--enable-debug-variables=true"]
-        if _enable_print_ub_bits():
-            _compile_option_list += ["--enable-print-memory-allocated-size"]
-
-        enable_hivm_auto_cv_balance = metadata["enable_hivm_auto_cv_balance"]
-        if enable_hivm_auto_cv_balance is not None:
-            _compile_option_list += \
-                [f"--enable-hivm-auto-cv-balance={enable_hivm_auto_cv_balance}"]
-
-        sync_solver = metadata["sync_solver"]
-        if sync_solver is not None:
-            _compile_option_list += \
-                [f"--enable-hivm-graph-sync-solver={sync_solver}"]
-
-        unit_flag = metadata["unit_flag"]
-        if unit_flag is not None:
-            _compile_option_list += \
-                [f"--enable-hivm-unit-flag-sync={unit_flag}"]
-
-        inject_barrier_all = metadata["inject_barrier_all"]
-        if inject_barrier_all is not None:
-            _compile_option_list += \
-                [f"--enable-hivm-inject-barrier-all-sync={inject_barrier_all}"]
-
-        inject_block_all = metadata["inject_block_all"]
-        if inject_block_all is not None:
-            _compile_option_list += \
-                [f"--enable-hivm-inject-block-all-sync={inject_block_all}"]
-
-        limit_auto_multi_buffer_only_for_local_buffer = metadata["limit_auto_multi_buffer_only_for_local_buffer"]
-        if limit_auto_multi_buffer_only_for_local_buffer is not None:
-            _compile_option_list += \
-                [f"--limit-auto-multi-buffer-only-for-local-buffer={limit_auto_multi_buffer_only_for_local_buffer}"]
-
-        set_workspace_multibuffer = metadata["set_workspace_multibuffer"]
-        if set_workspace_multibuffer is not None:
-            _compile_option_list += \
-                [f"--set-workspace-multibuffer={set_workspace_multibuffer}"]
-
-        auto_multi_buffer = metadata["limit_auto_multi_buffer_of_local_buffer"]
-        if auto_multi_buffer is None:
-            auto_multi_buffer = "no-limit"
-        _compile_option_list += \
-            [f"--limit-auto-multi-buffer-of-local-buffer={auto_multi_buffer}"]
-        auto_multi_buffer_buffer = metadata["limit_auto_multi_buffer_buffer"]
-        if auto_multi_buffer_buffer is not None:
-            _compile_option_list += \
-                [f"--limit-auto-multi-buffer-buffer={auto_multi_buffer_buffer}"]
-
-        enable_mixed_cv = metadata["enable_mixed_cv"]
-        if enable_mixed_cv is not None:
-            _compile_option_list += \
-                [f"--enable-mixed-cv={enable_mixed_cv}"]
-
-        enable_dynamic_cv_pipeline = metadata["enable_dynamic_cv_pipeline"]
-        if (enable_dynamic_cv_pipeline == True
-                and _is_a5_target_arch(metadata.get("target_arch", metadata.get("arch", "")))
-                and not metadata.get("disable_vf_operand_substitution", False)):
-            _compile_option_list += [f"--enable-vf-operand-substitution=True"]
-
-        enable_flatten = metadata["enable_flatten"]
-        if enable_flatten is not None:
-            _compile_option_list += \
-                [f"--enable-flatten={enable_flatten}"]
-
-        enable_auto_vectorize_v2 = metadata["enable_auto_vectorize_v2"]
-        if enable_auto_vectorize_v2 is not None:
-            _compile_option_list += \
-                [f"--enable-auto-vectorize-v2={enable_auto_vectorize_v2}"]
-        auto_vectorize_v2_max_fused_ops_num = metadata["auto_vectorize_v2_max_fused_ops_num"]
-        if auto_vectorize_v2_max_fused_ops_num is not None:
-            _compile_option_list += \
-                [f"--hfusion-max-fused-ops-in-auto-vectorize-v2={auto_vectorize_v2_max_fused_ops_num}"]
-        prevec_max_fused_ops_num = metadata["prevec_max_fused_ops_num"]
-        if prevec_max_fused_ops_num is not None:
-            _compile_option_list += \
-                [f"--hfusion-max-fused-elementwise-ops={prevec_max_fused_ops_num}"]
-
-        disable_auto_inject_block_sync = metadata["disable_auto_inject_block_sync"]
-        if disable_auto_inject_block_sync is not None:
-            _compile_option_list += \
-                [f"--disable-auto-inject-block-sync={disable_auto_inject_block_sync}"]
-
-        bitcodes = metadata["bitcodes"]
-        if bitcodes is not None:
-            for bitcode in bitcodes:
-                _compile_option_list += \
-                    [f"--link-aicore-bitcode={bitcode}"]
-
-        if metadata["auto_blockify_enabled"]:
-            _compile_option_list += ["--enable-auto-blockify-loop"]
-        npu_compiler_path, env = _get_npucompiler_path()
-        if npu_compiler_path.endswith("bishengir-compile"):
-            _compile_option_list += [
-                "--enable-hfusion-compile=true",
-                "--enable-triton-kernel-compile=true",
-            ]
-            if getattr(opt, "enable_tla_mode", False):
-                _compile_option_list += ["--enable-tla-mode=true"]
-            _compile_option_list += _full_row_copy_compile_options(metadata, npu_compiler_path)
-            # Temporary until the NPU compiler enables batch matmul by default in Q4.
-            if metadata.get("enable_hivm_batch_matmul"):
-                _compile_option_list += ["--enable-hivm-batch-matmul"]
-            if metadata.get("enable_vf_stack_limit"):
-                _compile_option_list += ["--enable-vf-stack-limit"]
-        bisheng_options = metadata["bisheng_options"]
-        if bisheng_options is not None:
-            _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
         if opt.debug:
-            _compile_option_list += ["--mlir-print-ir-after-failure"]
-            _compile_option_list += ["--mlir-print-stacktrace-on-diagnostic"]
-
-        vf_merge_level = metadata["vf_merge_level"]
-        if vf_merge_level is not None:
-            _compile_option_list += [f"--enable-vf-merge-level={vf_merge_level}"]
-
-        hfusion_enable_multiple_consumer_fusion = metadata["hfusion_enable_multiple_consumer_fusion"]
-        if hfusion_enable_multiple_consumer_fusion is not None:
-            _compile_option_list += [
-                f"--hfusion-enable-multiple-consumer-fusion={hfusion_enable_multiple_consumer_fusion}"
-            ]
-
-        plan_memory_strategy = metadata["plan_memory_strategy"]
-        if plan_memory_strategy is not None:
-            _compile_option_list += [f"--plan-memory-strategy={plan_memory_strategy}"]
-
-        if opt.debug:
+            _compile_option_list += ["--mlir-print-ir-after-failure", "--mlir-print-stacktrace-on-diagnostic"]
             _compile_option_list += [f"--save-temps={_get_save_temps_dir(metadata['hash'])}"]
 
         cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])

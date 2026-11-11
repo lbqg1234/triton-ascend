@@ -297,6 +297,59 @@ def _parse_options(compiler, arch, opts=None):
     return backend.parse_options({} if opts is None else opts)
 
 
+@pytest.mark.parametrize("arch", ["Ascend950PR_9579", "Ascend950DT_9579", "Ascend910_9581"])
+def test_tla_npuir_options_keep_target_and_libdevice_without_auto_scheduling(compiler_module, monkeypatch, arch):
+    compiler = compiler_module
+    options = _parse_options(compiler, arch, {"_frontend_kind": "tla"})
+    metadata = dict(options.__dict__, target=SimpleNamespace(arch=arch), bitcodes=[])
+    monkeypatch.delenv("NPU_DEVICE_LIMIT", raising=False)
+    monkeypatch.setattr(compiler, "NPUUtils", lambda: SimpleNamespace(get_device_limit=lambda: (False, 28, 56)))
+    monkeypatch.setattr(compiler, "force_disable_ffts", lambda _arch: True)
+    monkeypatch.setattr(compiler, "_is_debug_line_info_disabled", lambda: True)
+
+    command = compiler._get_bishengir_compile_options_910_95(metadata, options, "/fake/bishengir-compile")
+
+    assert command == compiler.get_common_bishengir_compile_options(metadata) + [
+        "--enable-triton-kernel-compile=true",
+        "--enable-tla-mode=true",
+        "--disable-ffts",
+        "--custom-aic-number=28",
+        "--custom-aiv-number=56",
+        f"--append-bisheng-options={options.bisheng_options}",
+    ]
+    assert command[0] == "--target=Ascend950"
+    assert Path(options.bisheng_options.split()[-1]).name == "libdevice.10.bc"
+
+
+def test_tla_npuir_options_preserve_explicit_affinity_controls(compiler_module, monkeypatch):
+    compiler = compiler_module
+    options = _parse_options(compiler, "Ascend950PR_9579", {
+        "_frontend_kind": "tla",
+        "unit_flag": False,
+        "inject_barrier_all": True,
+        "plan_memory_strategy": "largest-first",
+        "enable_vf_stack_limit": True,
+    })
+    metadata = dict(options.__dict__, target=SimpleNamespace(arch=options.target_arch), bitcodes=["/extra/device.bc"])
+    monkeypatch.setenv("NPU_DEVICE_LIMIT", "14,28")
+    monkeypatch.setattr(compiler, "NPUUtils", lambda: SimpleNamespace(get_device_limit=lambda: (True, 14, 28)))
+    monkeypatch.setattr(compiler, "_is_ascend_sanitizer_enabled", lambda: True)
+    monkeypatch.setattr(compiler, "_enable_msdebug", lambda: True)
+    monkeypatch.setattr(compiler, "_enable_print_ub_bits", lambda: True)
+
+    command = compiler._get_bishengir_compile_options_910_95(metadata, options, "/fake/bishengir-compile")
+
+    assert set(command) >= {
+        "--custom-aic-number=14", "--custom-aiv-number=28",
+        "--enable-hivm-unit-flag-sync=False", "--enable-hivm-inject-barrier-all-sync=True",
+        "--plan-memory-strategy=largest-first", "--enable-vf-stack-limit",
+        "--link-aicore-bitcode=/extra/device.bc", "--enable-sanitizer=true",
+        "--enable-debug-info=true", "--enable-debug-variables=true",
+        "--enable-print-memory-allocated-size",
+        f"--append-bisheng-options={options.bisheng_options}",
+    }
+
+
 @pytest.mark.skip(reason="The case is not supported on Ascend 950, skipping for now. Will be fixed in future.")
 @pytest.mark.parametrize(
     ("arch", "requested_capacity", "expected_capacity"),
@@ -907,6 +960,23 @@ def test_finalize_program_launch_policy_pure_simt_ignores_blacklist(
     compiler_module._finalize_program_launch_policy(metadata, SimpleNamespace(is_pure_simt=True))
 
     assert metadata["auto_blockify_enabled"] is expected_auto
+    assert metadata["ptsm_cap_authorized"] is False
+
+
+@pytest.mark.parametrize("auto_map_enabled", [False, True])
+def test_tla_launch_policy_keeps_explicit_program_grid(compiler_module, monkeypatch, auto_map_enabled):
+    metadata = {
+        "program_grid_transforms": None,
+        "program_grid_mapping_applied": False,
+        "row_coalescing_applied": False,
+        "has_auto_blockify_blacklist_op": False,
+        "mix_mode": "aiv",
+    }
+    monkeypatch.setattr(compiler_module, "_is_auto_map_parallel_blocks_enabled", lambda: auto_map_enabled)
+
+    compiler_module._finalize_program_launch_policy(metadata, SimpleNamespace(enable_tla_mode=True, is_pure_simt=False))
+
+    assert metadata["auto_blockify_enabled"] is False
     assert metadata["ptsm_cap_authorized"] is False
 
 
