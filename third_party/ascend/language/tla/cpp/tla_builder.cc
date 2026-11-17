@@ -29,6 +29,7 @@
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
@@ -1390,6 +1391,14 @@ void init_tla_builder(py::module &&m) {
                  *memorySpace == hivm::AddressSpace::GM
                      ? Attribute{}
                      : hivm::AddressSpaceAttr::get(ctx, *memorySpace));
+           })
+      .def("create_tla_simt_thread_id",
+           [](TLABuilder &self) -> Value {
+             Value tid = self.create<gpu::ThreadIdOp>(gpu::Dimension::x);
+             return self
+                 .create<arith::IndexCastOp>(self.getBuilder().getI32Type(),
+                                             tid)
+                 .getResult();
            })
       .def("create_tla_simt_pointer",
            [](TLABuilder &self, Value source, Type pointerType) -> Value {
