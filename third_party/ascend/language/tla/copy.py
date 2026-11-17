@@ -76,6 +76,11 @@ def copy(src, dst, params=None, _semantic=None):
     route = _COPY_ROUTES.get((src.space, dst.space))
     if route is None:
         raise ValueError(f"tla.copy unsupported space pair {(src.space, dst.space)}")
+    if (src.space, dst.space) == ("ub", "gm"):
+        if dma._unwrap_if_constexpr(params) is not None:
+            raise TypeError("tla.copy UB->GM does not accept params")
+        route(src, dst, _semantic=_semantic)
+        return
     if src.space == "l0c" and dma._unwrap_if_constexpr(params) is None:
         mode = dma.FixpipeDMAMode.NZ2ND if len(dst.shape) == 2 else dma.FixpipeDMAMode.NZ2NZ
         params = _FIXPIPE_PARAMS[dst.space](dma_mode=mode)
