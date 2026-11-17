@@ -24,6 +24,7 @@
 #include "pybind11/pybind11.h"
 #include <pybind11/stl.h>
 
+#include "bishengir/Dialect/AscendDPX/IR/AscendDPX.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVMAVE/IR/HIVMAVE.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -1351,6 +1352,11 @@ void init_tla_builder(py::module &&m) {
                  *memorySpace == hivm::AddressSpace::GM
                      ? Attribute{}
                      : hivm::AddressSpaceAttr::get(ctx, *memorySpace));
+           })
+      .def("create_tla_simt_thread_id",
+           [](TLABuilder &self) -> Value {
+             return self.create<ascend_dpx::ThreadIdXOp>(
+                 self.getBuilder().getI32Type()).getResult();
            })
       .def("create_tla_simt_pointer",
            [](TLABuilder &self, Value source, Type pointerType) -> Value {

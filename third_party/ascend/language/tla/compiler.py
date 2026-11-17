@@ -211,6 +211,30 @@ def check_ttadapter(module):
             region = region.get_parent_region()
         return False
 
+    thread_regions = {
+        op.get_region(0).id()
+        for op in operations
+        if op.get_name() == "scope.scope" and op.get_str_attr("tla.simt_mode") == "thread"
+    }
+
+    def within_thread_scope(op):
+        block = op.get_block()
+        region = block.get_parent() if block is not None else None
+        while region is not None:
+            if region.id() in thread_regions:
+                return True
+            region = region.get_parent_region()
+        return False
+
+    for op in operations:
+        if within_thread_scope(op):
+            types = [op.get_operand(i).get_type() for i in range(op.get_num_operands())]
+            types.extend(op.get_result(i).get_type() for i in range(op.get_num_results()))
+            if any("tensor<" in str(ty) or str(ty).startswith("!tt.tensordesc") for ty in types):
+                raise ValueError("Thread SIMT VF does not support Tile Tensor operations")
+        elif op.get_name() == "ascend_dpx.thread_id_x":
+            raise ValueError("Thread ID is only valid inside Thread SIMT VF")
+
     converted_ops = {
         "tt.func", "tt.call", "tt.return", "tt.addptr", "tt.ptr_to_int", "tt.get_program_id", "tt.get_num_programs",
         "tt.assert", "tt.load", "tt.clampf"

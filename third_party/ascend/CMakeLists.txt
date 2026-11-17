@@ -31,6 +31,20 @@ set_property(DIRECTORY PROPERTY RULE_LAUNCH_LINK ${_saved_launch_link})
 include_directories(${ASCENDNPU_IR_SRC_DIR}/bishengir/include)
 include_directories(${ASCENDNPU_IR_BINARY_DIR}/bishengir/include) # Tablegen'd files
 
+# TLA Thread VFs emit DPX thread primitives directly. Standalone NPUIR does
+# not include DPX in its dialect subset, so add only the IR and its headers.
+if(NOT TARGET BiShengIRAscendDPXDialect)
+  add_subdirectory(
+    ${ASCENDNPU_IR_SRC_DIR}/bishengir/include/bishengir/Dialect/AscendDPX/IR
+    ${ASCENDNPU_IR_BINARY_DIR}/bishengir/include/bishengir/Dialect/AscendDPX/IR)
+  add_subdirectory(
+    ${ASCENDNPU_IR_SRC_DIR}/bishengir/lib/Dialect/AscendDPX/IR
+    ${ASCENDNPU_IR_BINARY_DIR}/bishengir/lib/Dialect/AscendDPX/IR)
+  # The pinned DPX IR uses PointerUnion::get, deprecated by the LLVM 22 SDK.
+  target_compile_options(obj.BiShengIRAscendDPXDialect PRIVATE
+    -Wno-deprecated-declarations)
+endif()
+
 add_subdirectory(include)
 add_subdirectory(lib)
 
@@ -134,6 +148,7 @@ add_triton_plugin(TritonAscend
   TritonToLinalg
   BiShengIRScopeDialect
   BiShengIRHIVMDialect
+  BiShengIRAscendDPXDialect
   MLIRAVEDialect
 )
 
