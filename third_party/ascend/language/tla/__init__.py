@@ -75,7 +75,7 @@ from .fill import fill
 from .copy import copy
 from .dma import (
     PadMode,
-    EvictionPolicy,
+    L2CachePolicy,
     AtomicKind,
     UnitFlagMode,
     FixpipeDMAMode,
@@ -84,7 +84,6 @@ from .dma import (
     FixpipePreQuantMode,
     FixpipePreReluMode,
     LoadGM2UBParams,
-    StoreUB2GMParams,
     LoadGM2L1Params,
     CopyUB2L1Params,
     CopyL12UBParams,
@@ -160,7 +159,7 @@ __all__ = [
     "uint64",
     "AddressSpace",
     "PadMode",
-    "EvictionPolicy",
+    "L2CachePolicy",
     "AtomicKind",
     "UnitFlagMode",
     "FixpipeDMAMode",
@@ -169,7 +168,6 @@ __all__ = [
     "FixpipePreQuantMode",
     "FixpipePreReluMode",
     "LoadGM2UBParams",
-    "StoreUB2GMParams",
     "LoadGM2L1Params",
     "CopyUB2L1Params",
     "CopyL12UBParams",

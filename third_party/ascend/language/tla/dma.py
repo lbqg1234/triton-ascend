@@ -14,7 +14,7 @@ from .core import buffer
 
 
 class PadMode(Enum):
-    """Padding mode for GM->UB loads and UB->L1 copies.
+    """Padding mode for UB->L1 copies.
 
     - ``PadNull``: no padding.
     - ``PadFirstElem``: pad using the first element.
@@ -29,30 +29,28 @@ class PadMode(Enum):
     PadValue = "PadValue"
 
 
-class EvictionPolicy(Enum):
+class L2CachePolicy(Enum):
     """L2 eviction hint for GM loads.
 
-    - ``EvictNormal``: default eviction behavior.
-    - ``EvictFirst``: mark the data as likely to be evicted first.
-    - ``EvictLast``: mark the data as likely to be evicted last.
+    - ``NORMAL_FV``: mark the data as likely to be evicted first.
+    - ``NORMAL_LV``: mark the data as likely to be evicted last.
 
-    The hint does not change correctness; the backend decides whether a target
-    honors it.
+    These member names and meanings are stable. Future L2 cache modes extend
+    this enum without changing existing members. The hint does not change
+    correctness; the backend decides whether a target honors it. The string
+    values are internal HIVM spellings, not hardware encodings.
     """
 
-    EvictNormal = "EvictNormal"
-    EvictFirst = "EvictFirst"
-    EvictLast = "EvictLast"
+    NORMAL_FV = "EvictFirst"
+    NORMAL_LV = "EvictLast"
 
 
 class AtomicKind(Enum):
-    """Atomic operation kind for ``UB->GM`` stores.
+    """Atomic mode selected by the independent :func:`set_atomic` control.
 
-    ``ADD``, ``MAX`` and ``MIN`` are the native StoreOp atomic operations
-    documented by the backend. ``NONE`` omits the atomic attribute. The
-    remaining members are enumerated here but do not imply support for a
-    particular route, dtype or target; unsupported combinations are rejected
-    by the backend.
+    ``set_atomic`` accepts ``NONE``, ``ADD``, ``MAX`` and ``MIN``. ``NONE``
+    resets the mode for following GM stores. The remaining enum members are
+    not accepted by that control. DMA stores have no per-call atomic setting.
     """
 
     NONE = "none"
@@ -223,46 +221,17 @@ def _unit_flag_args(control, group_id):
 
 @dataclass(frozen=True)
 class LoadGM2UBParams:
-    """Configuration for :func:`load_gm_to_ub`.
+    """Cache configuration for :func:`load_gm_to_ub`.
 
-    :param pad_mode: Compile-time ``PadNull``, ``PadFirstElem`` or ``PadValue``
-        from ``tla.PadMode``. ``None`` leaves the attribute unset.
-    :type pad_mode: tla.PadMode or None
-    :param pad_value: Scalar fill value, converted to the source element type.
-        A runtime tensor must have scalar shape. ``None`` omits the operand.
-    :type pad_value: int, float, scalar tl.tensor or None
-    :param left_padding_num: Number of left padding elements, passed as an
-        index operand. ``None`` omits the operand.
-    :type left_padding_num: int, scalar integer tl.tensor or None
-    :param right_padding_num: Number of right padding elements, passed as an
-        index operand. ``None`` omits the operand.
-    :type right_padding_num: int, scalar integer tl.tensor or None
-    :param eviction_policy: Compile-time L2 eviction policy: ``EvictNormal``,
-        ``EvictFirst`` or ``EvictLast``. ``None`` leaves the attribute unset.
-    :type eviction_policy: tla.EvictionPolicy or None
+    :param l2_cache_ctrl: Compile-time L2 cache control: ``NORMAL_FV`` or
+        ``NORMAL_LV``. ``None`` selects ``NORMAL_FV``.
+    :type l2_cache_ctrl: tla.L2CachePolicy or None
 
-    All fields default to ``None``. Padding values/counts may be runtime
-    scalars; enum fields must be compile-time values. The backend checks
-    the padding-mode/operand combination and alignment.
+    Explicit padding configuration is not supported by this interface.
+    Aligned A5 GM-to-UB DMA still performs its intrinsic 32-byte alignment
+    fill; see :func:`load_gm_to_ub` for the write-footprint requirements.
     """
-    pad_mode: PadMode = None
-    pad_value: object = None
-    left_padding_num: object = None
-    right_padding_num: object = None
-    eviction_policy: EvictionPolicy = None
-
-
-@dataclass(frozen=True)
-class StoreUB2GMParams:
-    """Configuration for :func:`store_ub_to_gm`.
-
-    :param atomic_kind: Compile-time atomic operation. Defaults to ``None``,
-        which omits the attribute. ``ADD``, ``MAX`` and ``MIN`` are the native
-        StoreOp atomic operations documented by the backend. Other enum
-        members do not imply support for this route, dtype or target.
-    :type atomic_kind: tla.AtomicKind or None
-    """
-    atomic_kind: AtomicKind = None
+    l2_cache_ctrl: L2CachePolicy = None
 
 
 @dataclass(frozen=True)
@@ -502,7 +471,7 @@ def load_gm_to_ub(src, dst, params=None, _semantic=None):
     :param src: GM source with ``space="gm"``, typically created with ``tla.view``.
     :type src: tla.buffer
     :param dst: UB destination with ``space="ub"`` and the same element type
-        as ``src``. Its shape must accommodate the requested data and padding.
+        as ``src`` and a backend-compatible shape.
     :type dst: tla.buffer
     :param params: Configuration object. ``None`` (default) constructs
         ``tla.LoadGM2UBParams()``. See :class:`LoadGM2UBParams` for field formats.
@@ -512,9 +481,16 @@ def load_gm_to_ub(src, dst, params=None, _semantic=None):
 
     .. note::
         Pass buffer views, not raw pointers or buffer element accesses.
-        Padding counts are scalar operands; the backend checks supported
-        padding, alignment and dtype combinations. This interface does not
-        take the per-element mask of ``tl.load``.
+        Explicit padding configuration is not supported. Aligned A5 GM-to-UB
+        DMA performs intrinsic alignment fill: Normal mode fills each burst
+        to a 32-byte boundary; Ascend 950 Compact mode packs consecutive
+        bursts and fills only the end of the combined region to a 32-byte
+        boundary. Reserve the full physical write footprint and account for
+        it in buffer aliases, region reuse and synchronization. Initialize
+        other UB regions explicitly. Other lowering routes follow their own
+        write-footprint rules. The backend checks shape, alignment and dtype
+        combinations. This interface does not take the per-element mask of
+        ``tl.load``.
 
     Example inside a ``@tla.jit`` kernel::
 
@@ -523,18 +499,16 @@ def load_gm_to_ub(src, dst, params=None, _semantic=None):
     """
     _route(src, dst, (("gm", "ub"), ))
     p = _params(params, LoadGM2UBParams)
-    attrs = {
-        "pad_mode": _enum_attr(p.pad_mode, PadMode, "padmode", _semantic),
-        "eviction_policy": _enum_attr(p.eviction_policy, EvictionPolicy, "eviction_policy", _semantic),
-    }
-    _semantic.builder.create_tla_load(src.handle, dst.handle, attrs,
-                                      pad_value=_scalar(p.pad_value, _semantic, src.dtype),
-                                      left_padding_num=_scalar(p.left_padding_num, _semantic),
-                                      right_padding_num=_scalar(p.right_padding_num, _semantic))
+    l2_cache_ctrl = _unwrap_if_constexpr(p.l2_cache_ctrl)
+    if l2_cache_ctrl is None:
+        l2_cache_ctrl = L2CachePolicy.NORMAL_FV
+    # Keep the public cache control independent of HIVM attribute names.
+    eviction = _enum_attr(l2_cache_ctrl, L2CachePolicy, "eviction_policy", _semantic)
+    _semantic.builder.create_tla_load(src.handle, dst.handle, eviction)
 
 
 @builtin
-def store_ub_to_gm(src, dst, params=None, _semantic=None):
+def store_ub_to_gm(src, dst, _semantic=None):
     """Stores UB data to global memory using ``hivm.hir.store``.
 
     :param src: UB source with ``space="ub"``.
@@ -542,21 +516,17 @@ def store_ub_to_gm(src, dst, params=None, _semantic=None):
     :param dst: GM destination with ``space="gm"``, typically created with
         ``tla.view``. Its element type must match ``src``.
     :type dst: tla.buffer
-    :param params: Configuration object. ``None`` (default) constructs
-        ``tla.StoreUB2GMParams()``. See :class:`StoreUB2GMParams` for atomic modes.
-    :type params: tla.StoreUB2GMParams or None
     :return: None. The destination buffer is updated in place.
     :rtype: None
 
     .. note::
         Source and destination views must describe a backend-compatible tile.
-        Atomic operation and dtype support depend on the target backend;
-        ``atomic_kind=None`` leaves the atomic attribute unset.
+        A5 DMA stores have no per-call atomic setting. Use :func:`set_atomic`
+        to control the mode for following GM stores, synchronize their
+        completion, then explicitly reset the mode with ``AtomicKind.NONE``.
     """
     _route(src, dst, (("ub", "gm"), ))
-    p = _params(params, StoreUB2GMParams)
-    attrs = {"atomic_kind": _enum_attr(p.atomic_kind, AtomicKind, "atomic_kind", _semantic)}
-    _semantic.builder.create_tla_store(src.handle, dst.handle, attrs)
+    _semantic.builder.create_tla_store(src.handle, dst.handle)
 
 
 @builtin
