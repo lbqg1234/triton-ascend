@@ -130,9 +130,12 @@ class simd(scope):
 
 
 class simt(scope):
-    """Mark a tile-level SIMT VF on the Vector core.
+    """Mark a Tile or Thread SIMT VF on the Vector core.
 
-    Use standard Triton Tensor operations and ``tl.load/store`` for GM access.
+    ``num_warps`` configures this VF independently; omission inherits the kernel
+    configuration. ``mode="tile"`` preserves standard Triton Tensor programming.
+    ``mode="thread"`` uses per-thread scalars and ``tla.simt.thread_id``.
+    Both modes use standard ``tl.load/store`` for GM access.
     TTIR is preserved for subsequent SIMT module extraction; target compilation
     requires an NPUIR affinity pipeline with SIMT VF lowering support.
     """

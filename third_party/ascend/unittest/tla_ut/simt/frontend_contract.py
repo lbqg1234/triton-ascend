@@ -233,3 +233,49 @@ def test_non_pointer_ucc_is_rejected_during_collection(tmp_path, capfd, inside):
     with pytest.raises(RuntimeError, match="PassManager::run failed"):
         _run_bridge_adapter(tmp_path, text)
     assert "one-to-one memref-to-pointer bridge" in capfd.readouterr().err
+
+
+@tla.jit
+def configured_simt(X, MODE: tl.constexpr, WARPS: tl.constexpr):
+    with tla.scope.simt(mode=MODE, num_warps=WARPS):
+        tl.store(X, 1.0)
+
+
+@pytest.mark.parametrize("mode,warps", [("tile", 2), ("thread", 4)])
+def test_per_vf_configuration_is_preserved(mode, warps):
+    module = _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+    assert f'tla.simt_mode = "{mode}"' in str(module)
+    assert f'tla.simt_num_warps = {warps}' in str(module)
+
+
+@pytest.mark.parametrize("mode,warps,message", [
+    ("invalid", 4, "mode must be a compile-time"),
+    ("thread", 0, "num_warps must be a compile-time"),
+    ("thread", 3, "num_warps must be a compile-time"),
+    ("thread", 128, "num_warps must be a compile-time"),
+])
+def test_invalid_vf_configuration_is_rejected(mode, warps, message):
+    with pytest.raises(Exception, match=message):
+        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+
+
+@tla.jit
+def thread_tensor(X):
+    with tla.scope.simt(mode="thread"):
+        tl.store(X + tl.arange(0, 32), 1.0)
+
+
+def test_thread_vf_rejects_tile_tensor_operations():
+    with pytest.raises(ValueError, match="Thread SIMT VF does not support Tile Tensor"):
+        _lower(thread_tensor, {"X": "*fp32"})
+
+
+@tla.jit
+def tile_thread_id(X):
+    with tla.scope.simt():
+        tl.store(X + tla.simt.thread_id(), 1.0)
+
+
+def test_tile_vf_rejects_explicit_thread_id():
+    with pytest.raises(Exception, match="thread_id must be called inside Thread SIMT VF"):
+        _lower(tile_thread_id, {"X": "*fp32"})
