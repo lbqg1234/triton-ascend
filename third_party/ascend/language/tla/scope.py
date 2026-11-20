@@ -132,9 +132,13 @@ class simd(scope):
 class simt(scope):
     """Mark a Tile or Thread SIMT VF on the Vector core.
 
-    ``num_warps`` configures this VF independently; omission inherits the kernel
-    configuration. ``mode="tile"`` preserves standard Triton Tensor programming.
+    ``num_warps`` configures this VF independently. With ``super_block_factor=1``,
+    omission inherits the kernel configuration.
+    ``mode="tile"`` preserves standard Triton Tensor programming.
     ``mode="thread"`` uses per-thread scalars and ``tla.simt.thread_id``.
+    A factor greater than 1 runs multiple single-warp tasks in one launch.
+    In this case ``num_warps`` defaults to 1 and must equal 1.
+    Use ``tla.simt.task_id`` to index each task's work.
     Both modes use standard ``tl.load/store`` for GM access.
     TTIR is preserved for subsequent SIMT module extraction; target compilation
     requires an NPUIR affinity pipeline with SIMT VF lowering support.

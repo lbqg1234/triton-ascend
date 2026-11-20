@@ -41,6 +41,7 @@ def setup_unified_builder(main_builder, ascend_builder):
     from .dispatch import register_with_dispatch
 
     register_with_dispatch()
+    main_builder._tla_builder = ascend_builder
     # Only attach TLA-specific methods.  The cann setup_unified_builder owns
     # _ascend_builder and the shared methods; re-attaching or reassigning them
     # here would shadow the cann versions for every kernel.
@@ -56,6 +57,7 @@ def setup_unified_builder(main_builder, ascend_builder):
         'create_tla_buffer_type',
         'create_tla_simt_pointer',
         'create_tla_simt_thread_id',
+        'create_tla_simt_physical_warp_id',
         'create_tla_simt_warp_reduce_sum',
         'create_tla_simt_sync_threads',
         'create_tla_vector_type',

@@ -1,11 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Pointer bridges and explicit Thread collectives for SIMT VFs."""
+"""Indexing, explicit Thread collectives and UB pointers for SIMT VFs."""
 
 from triton.language import core as tl
 
 from .core import buffer
 
-__all__ = ["to_ptr", "thread_id", "warp_reduce_sum", "sync_threads"]
+__all__ = ["to_ptr", "thread_id", "task_id", "warp_reduce_sum", "sync_threads"]
 
 
 @tl.builtin
@@ -36,13 +36,31 @@ def to_ptr(src, _semantic=None):
 
 @tl.builtin
 def thread_id(_semantic=None):
-    """Return the current Thread VF thread index as an i32 scalar.
+    """Return the thread index within its logical task as an i32 scalar.
 
     Only valid inside ``tla.scope.simt(mode="thread")``. The one-dimensional
-    index is in ``[0, num_warps * 32)`` for the current VF.
+    index is in ``[0, num_warps * 32)`` for each task.
     """
     _check_thread_vf("tla.simt.thread_id", _semantic)
     return tl.tensor(_semantic.builder.create_tla_simt_thread_id(), tl.int32)
+
+
+@tl.builtin
+def task_id(_semantic=None):
+    """Return the logical task index within the current SIMT VF invocation.
+
+    The i32 result is in ``[0, super_block_factor)``. Each task has its own
+    logical threads. Use the task index for work assignment, tail masking and
+    indexing disjoint regions of explicit UB Buffers.
+    """
+    context = getattr(_semantic.builder, "_tla_context", None)
+    if context is None or context.vf_mode != "simt":
+        raise ValueError("tla.simt.task_id must be called inside SIMT VF")
+    factor = context.super_block_factor
+    if factor == 1:
+        return _semantic.to_tensor(0)
+    warp_id = tl.tensor(_semantic.builder.create_tla_simt_physical_warp_id(), tl.int32)
+    return _semantic.and_(warp_id, factor - 1)
 
 
 def _check_thread_vf(name, semantic):

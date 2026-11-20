@@ -29,9 +29,6 @@ def simt_copy(X, Y, BLOCK: tl.constexpr):
                                            ("fp32", "f32")])
 def test_simt_preserves_ttir_and_entry_pointer_abi(dtype, backing):
     module = _lower(simt_copy, {"X": "*" + dtype, "Y": "*" + dtype}, {"BLOCK": 32})
-    entry, = _ops(module, "func.func")
-    assert entry.get_str_attr("parallel_mode") == "mix_simd_simt"
-    assert entry.get_str_attr("mix_mode") == "aiv"
     text = str(module)
     assert f"memref<?x{backing}>" in text
     assert 'hacc.mode = "tla"' in text
@@ -236,16 +233,33 @@ def test_non_pointer_ucc_is_rejected_during_collection(tmp_path, capfd, inside):
 
 
 @tla.jit
-def configured_simt(X, MODE: tl.constexpr, WARPS: tl.constexpr):
-    with tla.scope.simt(mode=MODE, num_warps=WARPS):
+def configured_simt(X, MODE: tl.constexpr, WARPS: tl.constexpr, FACTOR: tl.constexpr):
+    with tla.scope.simt(mode=MODE, num_warps=WARPS, super_block_factor=FACTOR):
         tl.store(X, 1.0)
 
 
-@pytest.mark.parametrize("mode,warps", [("tile", 2), ("thread", 4)])
-def test_per_vf_configuration_is_preserved(mode, warps):
-    module = _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+@pytest.mark.parametrize("mode", ["tile", "thread"])
+@pytest.mark.parametrize("warps,factor", [(4, 1), (1, 4)])
+def test_per_vf_configuration_is_preserved(mode, warps, factor):
+    module = _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": factor})
+    entry, = _ops(module, "func.func")
+    assert entry.get_str_attr("parallel_mode") == "mix_simd_simt"
+    assert entry.get_str_attr("mix_mode") == "aiv"
     assert f'tla.simt_mode = "{mode}"' in str(module)
     assert f'tla.simt_num_warps = {warps}' in str(module)
+
+
+@tla.jit
+def simt_default_warps(X, MODE: tl.constexpr, FACTOR: tl.constexpr):
+    with tla.scope.simt(mode=MODE, super_block_factor=FACTOR):
+        tl.store(X, 1.0)
+
+
+@pytest.mark.parametrize("mode", ["tile", "thread"])
+@pytest.mark.parametrize("factor,warps", [(1, 4), (4, 1)])
+def test_simt_default_warps_follow_factor(mode, factor, warps):
+    module = _lower(simt_default_warps, {"X": "*fp32"}, {"MODE": mode, "FACTOR": factor})
+    assert f"tla.simt_num_warps = {warps} : i32" in str(module)
 
 
 @pytest.mark.parametrize("mode,warps,message", [
@@ -256,7 +270,19 @@ def test_per_vf_configuration_is_preserved(mode, warps):
 ])
 def test_invalid_vf_configuration_is_rejected(mode, warps, message):
     with pytest.raises(Exception, match=message):
-        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": 1})
+
+
+@pytest.mark.parametrize("mode,warps,factor,message", [
+    ("thread", 1, 0, "super_block_factor must be a compile-time"),
+    ("thread", 1, 3, "super_block_factor must be a compile-time"),
+    ("tile", 1, 128, "super_block_factor must be a compile-time"),
+    ("tile", 2, 4, "requires num_warps=1"),
+    ("thread", 2, 4, "requires num_warps=1"),
+])
+def test_invalid_superblocking_configuration_is_rejected(mode, warps, factor, message):
+    with pytest.raises(Exception, match=message):
+        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": factor})
 
 
 @tla.jit

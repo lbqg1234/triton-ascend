@@ -46,7 +46,7 @@ def test_compile():
     x = torch.empty(160, dtype=torch.float32, device="npu")
     y = torch.empty_like(x)
     # The VF's explicit four warps must take precedence over the kernel default.
-    check_kernel_binary(thread_add_one.warmup(x, y, 127, grid=(1,), num_warps=8))
+    check_kernel_binary(thread_add_one.warmup(x, y, 127, grid=(1, ), num_warps=8))
 
 
 @pytest.mark.skipif(not get_stages()[2], reason="device run stage disabled")
@@ -57,10 +57,71 @@ def test_run(valid):
 
     source = torch.arange(160, dtype=torch.float32) + 0.25
     x = source.to("npu")
-    y = torch.full((160,), -1024.0, dtype=torch.float32, device="npu")
-    thread_add_one[(1,)](x, y, valid, num_warps=8)
+    y = torch.full((160, ), -1024.0, dtype=torch.float32, device="npu")
+    thread_add_one[(1, )](x, y, valid, num_warps=8)
     torch.npu.synchronize()
-    expected = torch.full((160,), -1024.0, dtype=torch.float32)
+    expected = torch.full((160, ), -1024.0, dtype=torch.float32)
     written = min(valid, 128)
     expected[:written] = source[:written] + 1.0
+    torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)
+
+
+@tla.jit
+def task_offset():
+    return tla.simt.task_id() * 32 + tla.simt.thread_id()
+
+
+@tla.jit
+def grouped_thread_add_one(X, Y, N, FACTOR: tl.constexpr):
+    pid_x = tl.program_id(0)
+    with tla.scope.simt(mode="thread", num_warps=1, super_block_factor=FACTOR):
+        pid = tl.program_id(1) * tl.num_programs(0) + pid_x
+        index = pid * (FACTOR * 32) + task_offset()
+        if index < N:
+            value = tl.load(X + index)
+            tl.store(Y + index, value + 1.0)
+
+
+@tla.jit
+def grouped_tile_add_one(X, Y, N, FACTOR: tl.constexpr):
+    pid_x = tl.program_id(0)
+    with tla.scope.simt(num_warps=1, super_block_factor=FACTOR):
+        pid = tl.program_id(1) * tl.num_programs(0) + pid_x
+        base = (pid * FACTOR + tla.simt.task_id()) * 32
+        if base < N:
+            index = base + tl.arange(0, 32)
+            value = tl.load(X + index, mask=index < N, other=0.0)
+            tl.store(Y + index, value + 1.0, mask=index < N)
+
+
+@pytest.mark.parametrize("factor", [1, 4])
+@pytest.mark.parametrize("kernel,operation", [(grouped_thread_add_one, "gpu.thread_id"),
+                                              (grouped_tile_add_one, "tt.make_range")])
+def test_superblocking_ir(kernel, operation, factor):
+    module, ctx = compile_offline(kernel, {"X": "*fp32", "Y": "*fp32", "N": "i32"}, {"FACTOR": factor})
+    module = lower_offline(module, ctx)
+    text = str(module)
+    assert module.verify()
+    assert "tt.get_program_id y" in text and operation in text
+    if factor > 1:
+        assert f"tla.simt_super_block_factor = {factor}" in text
+        assert "gpu.subgroup_id" in text and "arith.andi" in text
+    else:
+        assert "tla.simt_super_block_factor" not in text and "gpu.subgroup_id" not in text
+
+
+@pytest.mark.skipif(not get_stages()[2], reason="device run stage disabled")
+@pytest.mark.parametrize("factor,valid", [(1, 101), (4, 415)])
+@pytest.mark.parametrize("kernel", [grouped_thread_add_one, grouped_tile_add_one])
+def test_superblocking_run(kernel, factor, valid):
+    import torch
+    import torch_npu  # noqa: F401
+
+    source = torch.arange(544, dtype=torch.float32) + 0.25
+    x = source.to("npu")
+    y = torch.full_like(x, -1024.0)
+    kernel[(2, 2)](x, y, valid, factor, num_warps=8)
+    torch.npu.synchronize()
+    expected = torch.full_like(source, -1024.0)
+    expected[:valid] = source[:valid] + 1.0
     torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)
