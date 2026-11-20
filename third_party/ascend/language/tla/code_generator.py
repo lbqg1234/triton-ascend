@@ -27,10 +27,12 @@ __all__ = ["handle_scope_with"]
 class _TLACallerContext:
     """Carry the effective core and VF modes into JIT helper specializations."""
 
-    def __init__(self, core_mode, vf_mode, simt_mode=None):
+    def __init__(self, core_mode, vf_mode, tla_builder, simt_mode=None, super_block_factor=1):
         self.core_mode = core_mode
         self.vf_mode = vf_mode
+        self.tla_builder = tla_builder
         self.simt_mode = simt_mode
+        self.super_block_factor = super_block_factor
 
     def mangle(self):
         suffix = f"_tla_{self.core_mode}"
@@ -38,9 +40,14 @@ class _TLACallerContext:
             suffix += f"_{self.vf_mode}"
         if self.simt_mode is not None:
             suffix += f"_{self.simt_mode}"
+        if self.super_block_factor != 1:
+            suffix += f"_super_block_{self.super_block_factor}"
         return suffix
 
     def initialize_callee(self, function, builder):
+        from .builder import setup_unified_builder
+
+        setup_unified_builder(builder, self.tla_builder)
         builder._tla_context = self
 
 
@@ -65,27 +72,34 @@ def handle_scope_with(generator, node):
 
     simt_mode = None
     num_warps = None
+    super_block_factor = 1
     if withitem_class.vf_mode == "simt":
         if context_expr.args:
             raise TypeError("tla.scope.simt accepts keyword arguments only")
         kwargs = {}
         for keyword in context_expr.keywords:
-            if keyword.arg not in ("mode", "num_warps") or keyword.arg in kwargs:
-                raise TypeError("tla.scope.simt only accepts mode and num_warps")
+            if keyword.arg not in ("mode", "num_warps", "super_block_factor") or keyword.arg in kwargs:
+                raise TypeError("tla.scope.simt only accepts mode, num_warps and super_block_factor")
             kwargs[keyword.arg] = tl._unwrap_if_constexpr(generator.visit(keyword.value))
         simt_mode = kwargs.get("mode", "tile")
         if not isinstance(simt_mode, str) or simt_mode not in ("tile", "thread"):
             raise ValueError("tla.scope.simt mode must be a compile-time 'tile' or 'thread'")
         num_warps = kwargs.get("num_warps", generator.builder.options.num_warps)
-        if (type(num_warps) is not int or num_warps < 1 or num_warps > 64
-                or num_warps & (num_warps - 1)):
+        if (type(num_warps) is not int or num_warps < 1 or num_warps > 64 or num_warps & (num_warps - 1)):
             raise ValueError("tla.scope.simt num_warps must be a compile-time power of two in [1, 64]")
+        super_block_factor = kwargs.get("super_block_factor", 1)
+        if (type(super_block_factor) is not int or super_block_factor < 1
+                or super_block_factor & (super_block_factor - 1)):
+            raise ValueError("tla.scope.simt super_block_factor must be a compile-time positive power of two")
+        if num_warps * super_block_factor > 64:
+            raise ValueError("tla.scope.simt num_warps * super_block_factor must be at most 64")
     elif context_expr.args or context_expr.keywords:
         raise TypeError("this TLA scope does not accept arguments")
 
     previous_context = generator.caller_context
     previous_tla_context = getattr(generator.builder, "_tla_context", None)
-    generator.caller_context = _TLACallerContext(withitem_class.core_mode, withitem_class.vf_mode, simt_mode)
+    generator.caller_context = _TLACallerContext(withitem_class.core_mode, withitem_class.vf_mode,
+                                                 generator.builder._tla_builder, simt_mode, super_block_factor)
     generator.builder._tla_context = generator.caller_context
     try:
         with enter_sub_region(generator):
@@ -93,6 +107,8 @@ def handle_scope_with(generator, node):
             if simt_mode is not None:
                 attrs["tla.simt_mode"] = generator.builder.get_string_attr(simt_mode)
                 attrs["tla.simt_num_warps"] = generator.builder.get_int32_attr(num_warps)
+                if super_block_factor > 1:
+                    attrs["tla.simt_super_block_factor"] = generator.builder.get_int32_attr(super_block_factor)
             scope_op = generator.builder.create_scope_op(attrs, [])
             body = generator.builder.get_scope_entry_block(scope_op)
             generator.builder.set_insertion_point_to_start(body)

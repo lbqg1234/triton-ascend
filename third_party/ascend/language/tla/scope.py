@@ -108,6 +108,8 @@ class simt(scope):
     ``num_warps`` configures this VF independently; omission inherits the kernel
     configuration. ``mode="tile"`` preserves standard Triton Tensor programming.
     ``mode="thread"`` uses per-thread scalars and ``tla.simt.thread_id``.
+    A SIMT VF can set ``super_block_factor`` to run multiple logical tasks
+    in one launch. Use ``tla.simt.task_id`` to index each task's work.
     Both modes use standard ``tl.load/store`` for GM access.
     TTIR is preserved for subsequent SIMT module extraction; target compilation
     requires an NPUIR affinity pipeline with SIMT VF lowering support.

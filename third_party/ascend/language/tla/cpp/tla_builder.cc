@@ -1401,6 +1401,17 @@ void init_tla_builder(py::module &&m) {
                                              tid)
                  .getResult();
            })
+      .def("create_tla_simt_physical_warp_id",
+           [](TLABuilder &self) -> Value {
+             Value warpId =
+                 self.create<gpu::SubgroupIdOp>(
+                         self.getBuilder().getIndexType(), IntegerAttr{})
+                     .getResult();
+             return self
+                 .create<arith::IndexCastOp>(self.getBuilder().getI32Type(),
+                                             warpId)
+                 .getResult();
+           })
       .def("create_tla_simt_warp_reduce_sum",
            [](TLABuilder &self, Value value) -> Value {
              return self.create<ascend_dpx::ReduceAdd>(value.getType(), value)

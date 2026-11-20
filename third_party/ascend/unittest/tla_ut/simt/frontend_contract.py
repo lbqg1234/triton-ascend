@@ -233,14 +233,14 @@ def test_non_pointer_ucc_is_rejected_during_collection(tmp_path, capfd, inside):
 
 
 @tla.jit
-def configured_simt(X, MODE: tl.constexpr, WARPS: tl.constexpr):
-    with tla.scope.simt(mode=MODE, num_warps=WARPS):
+def configured_simt(X, MODE: tl.constexpr, WARPS: tl.constexpr, FACTOR: tl.constexpr):
+    with tla.scope.simt(mode=MODE, num_warps=WARPS, super_block_factor=FACTOR):
         tl.store(X, 1.0)
 
 
 @pytest.mark.parametrize("mode,warps", [("tile", 2), ("thread", 4)])
 def test_per_vf_configuration_is_preserved(mode, warps):
-    module = _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+    module = _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": 1})
     assert f'tla.simt_mode = "{mode}"' in str(module)
     assert f'tla.simt_num_warps = {warps}' in str(module)
 
@@ -253,7 +253,17 @@ def test_per_vf_configuration_is_preserved(mode, warps):
 ])
 def test_invalid_vf_configuration_is_rejected(mode, warps, message):
     with pytest.raises(Exception, match=message):
-        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps})
+        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": 1})
+
+
+@pytest.mark.parametrize("mode,warps,factor,message", [
+    ("thread", 2, 0, "super_block_factor must be a compile-time"),
+    ("thread", 2, 3, "super_block_factor must be a compile-time"),
+    ("tile", 32, 4, r"num_warps \* super_block_factor must be at most 64"),
+])
+def test_invalid_superblocking_configuration_is_rejected(mode, warps, factor, message):
+    with pytest.raises(Exception, match=message):
+        _lower(configured_simt, {"X": "*fp32"}, {"MODE": mode, "WARPS": warps, "FACTOR": factor})
 
 
 @tla.jit
