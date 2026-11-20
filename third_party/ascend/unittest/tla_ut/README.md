@@ -52,6 +52,12 @@ The default `all` auto-degrades to `ir` when no NPU is available.
   pointers can be used directly. Convert the root Buffer in the kernel before
   passing the pointer to a standard Triton helper; generic TLA helper-builder
   initialization is outside this SIMT change. Target compile/run needs affinity SIMT lowering.
+  `thread_add_one.py` covers per-thread GM access and local VF launch configuration.
+  `warp_reduce_sum.py` checks native FP16/FP32/i32 Warp sums returned to every lane.
+  `sync_threads.py` composes cross-Warp sums using explicit UB scratch, including
+  more than 32 partials and scratch reuse protected by full-VF barriers. These
+  Thread collectives require converged participation; no cross-Warp sum API or
+  implicit scratch allocation is introduced.
 
 ## How to verify
 

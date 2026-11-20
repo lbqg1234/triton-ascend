@@ -173,8 +173,7 @@ def _lower_bridge_module(tmp_path, layout="identity", placement="outside", dead=
         "offset": ("1", "16", "1", "memref<16xf32, strided<[1], offset: 1>, #hivm.address_space<ub>>"),
         "strided": ("0", "16", "2", "memref<16xf32, strided<[2]>, #hivm.address_space<ub>>"),
         # Contiguous data alone is insufficient: the layout must be identity.
-        "singleton": ("0", "4, 1, 8", "8, 99, 1",
-                      "memref<4x1x8xf32, strided<[8, 99, 1]>, #hivm.address_space<ub>>"),
+        "singleton": ("0", "4, 1, 8", "8, 99, 1", "memref<4x1x8xf32, strided<[8, 99, 1]>, #hivm.address_space<ub>>"),
     }[layout]
     bridge = f"%p = builtin.unrealized_conversion_cast %view : {view_type} to !tt.ptr<f32, 6>"
     text = f'''module {{
@@ -202,8 +201,7 @@ def test_identity_alias_bridge_is_localized(tmp_path, placement):
     assert bridge.get_block().get_parent().id() == scope.get_region(0).id()
 
 
-@pytest.mark.parametrize("layout,placement", [("offset", "outside"), ("strided", "inside"),
-                                             ("singleton", "outside")])
+@pytest.mark.parametrize("layout,placement", [("offset", "outside"), ("strided", "inside"), ("singleton", "outside")])
 def test_nonidentity_bridge_layouts_are_rejected(tmp_path, capfd, layout, placement):
     with pytest.raises(RuntimeError, match="PassManager::run failed"):
         _lower_bridge_module(tmp_path, layout=layout, placement=placement)
@@ -278,3 +276,70 @@ def tile_thread_id(X):
 def test_tile_vf_rejects_explicit_thread_id():
     with pytest.raises(Exception, match="thread_id must be called inside Thread SIMT VF"):
         _lower(tile_thread_id, {"X": "*fp32"})
+
+
+@tla.jit
+def thread_collectives(X, Y):
+    with tla.scope.simt(num_warps=4, mode="thread"):
+        tid = tla.simt.thread_id()
+        value = tl.load(X + tid)
+        total = tla.simt.warp_reduce_sum(value)
+        tl.store(Y + tid, total)
+        tla.simt.sync_threads()
+
+
+@pytest.mark.parametrize("dtype,ir_type", [("fp16", "f16"), ("fp32", "f32"), ("i32", "i32")])
+def test_thread_collectives_preserve_scalar_dtype_and_explicit_ir(dtype, ir_type):
+    module = _lower(thread_collectives, {"X": "*" + dtype, "Y": "*" + dtype})
+    assert len(_ops(module, "ascend_dpx.reduce.add")) == 1
+    assert f"({ir_type}) -> {ir_type}" in str(module)
+    assert len(_ops(module, "gpu.barrier")) == 1
+    assert not _ops(module, "memref.alloc")
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "fp64", "i64", "u32"])
+def test_warp_reduce_sum_rejects_unsupported_dtypes(dtype):
+    with pytest.raises(Exception, match="warp_reduce_sum expects a float16, float32 or int32 scalar"):
+        _lower(thread_collectives, {"X": "*" + dtype, "Y": "*" + dtype})
+
+
+@tla.jit
+def invalid_collective_value(X, KIND: tl.constexpr):
+    scratch = tla.alloc((32, ), tl.float32)
+    with tla.scope.simt(mode="thread"):
+        if KIND == "tile":
+            value = tl.full((1, ), 1, tl.int32)
+        elif KIND == "buffer":
+            value = scratch
+        else:
+            value = X
+        tla.simt.warp_reduce_sum(value)
+
+
+@pytest.mark.parametrize("kind", ["tile", "buffer", "pointer"])
+def test_warp_reduce_sum_rejects_nonscalar_values(kind):
+    with pytest.raises(Exception, match="warp_reduce_sum expects a float16, float32 or int32 scalar"):
+        _lower(invalid_collective_value, {"X": "*fp32"}, {"KIND": kind})
+
+
+@tla.jit
+def collective_scope(X, OUTSIDE: tl.constexpr, REDUCE: tl.constexpr):
+    if OUTSIDE:
+        if REDUCE:
+            tla.simt.warp_reduce_sum(1.0)
+        else:
+            tla.simt.sync_threads()
+    else:
+        with tla.scope.simt():
+            if REDUCE:
+                tla.simt.warp_reduce_sum(1.0)
+            else:
+                tla.simt.sync_threads()
+
+
+@pytest.mark.parametrize("outside", [False, True])
+@pytest.mark.parametrize("reduce", [False, True])
+def test_thread_collectives_reject_other_execution_regions(outside, reduce):
+    name = "warp_reduce_sum" if reduce else "sync_threads"
+    with pytest.raises(Exception, match=name + " must be called inside Thread SIMT VF"):
+        _lower(collective_scope, {"X": "*fp32"}, {"OUTSIDE": outside, "REDUCE": reduce})

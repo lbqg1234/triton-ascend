@@ -24,6 +24,7 @@
 #include "pybind11/pybind11.h"
 #include <pybind11/stl.h>
 
+#include "bishengir/Dialect/AscendDPX/IR/AscendDPX.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVMAVE/IR/HIVMAVE.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -1400,6 +1401,13 @@ void init_tla_builder(py::module &&m) {
                                              tid)
                  .getResult();
            })
+      .def("create_tla_simt_warp_reduce_sum",
+           [](TLABuilder &self, Value value) -> Value {
+             return self.create<ascend_dpx::ReduceAdd>(value.getType(), value)
+                 .getResult();
+           })
+      .def("create_tla_simt_sync_threads",
+           [](TLABuilder &self) { self.create<gpu::BarrierOp>(); })
       .def("create_tla_simt_pointer",
            [](TLABuilder &self, Value source, Type pointerType) -> Value {
              return self.create<UnrealizedConversionCastOp>(pointerType, source)

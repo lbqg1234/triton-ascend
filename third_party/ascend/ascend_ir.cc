@@ -34,6 +34,7 @@
 #include "ascend/include/TritonToGraph/ProgramGridTransform.h"
 #include "ascend/include/TritonToGraph/ProgramMappingScalarSpecialization.h"
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
+#include "bishengir/Dialect/AscendDPX/IR/AscendDPX.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/HIVMAVE/IR/HIVMAVE.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -592,7 +593,8 @@ void init_ascend_ir(py::module &&m) {
     gDefaultAscendContext = &context;
     DialectRegistry registry;
     registry.insert<annotation::AnnotationDialect, mlir::hivm::HIVMDialect,
-                    mlir::hivmave::AVEDialect, scope::ScopeDialect>();
+                    mlir::hivmave::AVEDialect, scope::ScopeDialect,
+                    ascend_dpx::AscendDPXDialect>();
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });

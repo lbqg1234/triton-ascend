@@ -31,6 +31,16 @@ set_property(DIRECTORY PROPERTY RULE_LAUNCH_LINK ${_saved_launch_link})
 include_directories(${ASCENDNPU_IR_SRC_DIR}/bishengir/include)
 include_directories(${ASCENDNPU_IR_BINARY_DIR}/bishengir/include) # Tablegen'd files
 
+# Thread SIMT collectives emit DPX ops in the affinity frontend. Build only
+# their dialect IR alongside the existing standalone NPUIR dialects.
+add_subdirectory(${ASCENDNPU_IR_SRC_DIR}/bishengir/include/bishengir/Dialect/AscendDPX/IR
+                 ${ASCENDNPU_IR_BINARY_DIR}/bishengir/include/bishengir/Dialect/AscendDPX/IR)
+add_subdirectory(${ASCENDNPU_IR_SRC_DIR}/bishengir/lib/Dialect/AscendDPX/IR
+                 ${ASCENDNPU_IR_BINARY_DIR}/bishengir/lib/Dialect/AscendDPX/IR)
+# The bundled dialect still uses a deprecated MLIR callable accessor.
+target_compile_options(obj.BiShengIRAscendDPXDialect PRIVATE
+  -Wno-error=deprecated-declarations)
+
 add_subdirectory(include)
 add_subdirectory(lib)
 
@@ -133,6 +143,7 @@ add_triton_plugin(TritonAscend
   TritonToGraph
   TritonToLinalg
   BiShengIRScopeDialect
+  BiShengIRAscendDPXDialect
   BiShengIRHIVMDialect
   MLIRAVEDialect
 )
