@@ -56,6 +56,8 @@ def setup_unified_builder(main_builder, ascend_builder):
         'create_tla_buffer_type',
         'create_tla_simt_pointer',
         'create_tla_simt_thread_id',
+        'create_tla_simt_warp_reduce_sum',
+        'create_tla_simt_sync_threads',
         'create_tla_vector_type',
         'create_tla_alloc',
         'create_tla_load_scalar',
