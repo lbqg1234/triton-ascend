@@ -33,6 +33,9 @@ class _TLABackend(ascend.AscendBackend):
         if options.block_batching_factor != 1:
             raise ValueError("TLA kernels do not support automatic block batching")
         object.__setattr__(options, "enable_tla_mode", True)
+        shared_size = opts.get("shared_mem_dynamic_size")
+        if shared_size is not None and ascend._is_a5_target_arch(self.target.arch):
+            object.__setattr__(options, "shared_mem_dynamic_size", shared_size)
         object.__setattr__(options, _EXTRA_OPTIONS, normalize_extra_options(opts.get(_EXTRA_OPTIONS, ())))
         return options
 

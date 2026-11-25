@@ -110,6 +110,28 @@ def compiler_argv(request, tmp_path, monkeypatch):
     return calls
 
 
+@pytest.mark.parametrize("shared_size", [None, 160000])
+def test_simt_ub_budget_is_shared_with_launcher(compiler_argv, shared_size):
+    from triton.backends.ascend import launcher
+
+    if driver.active.get_current_target().arch == "Ascend910B2":
+        pytest.skip("TLA SIMT VF dynamic UB is tested on Ascend A5")
+
+    def simt_store(X):
+        with tla.scope.simt():
+            tl.store(X, 1.0)
+
+    options = {} if shared_size is None else {"shared_mem_dynamic_size": shared_size}
+    compiled = tla.jit(simt_store).warmup(MockTensor(tl.float32), grid=(1, ), **options)
+    expected = 221184 if shared_size is None else shared_size
+    sizes = [arg for arg in compiler_argv[-1] if arg.startswith("--shared-mem-dynamic-size=")]
+    assert sizes == [f"--shared-mem-dynamic-size={expected}"]
+    npu_utils = SimpleNamespace(get_aivector_core_num=lambda: 48)
+    spec = launcher.make_launch_spec(compiled.metadata, npu_utils)
+    assert spec.flags & launcher.DYNAMIC_SHARED
+    assert spec.shared_mem_dynamic_size == expected
+
+
 def test_extra_options_cache_and_argv(compiler_argv):
     flags = ["--mlir-print-ir-after-all", "--probe=two words"]
     first_jit = tla.jit(_kernel)

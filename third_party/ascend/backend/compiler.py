@@ -1010,6 +1010,8 @@ def _get_bishengir_compile_options_910_95(metadata, opt, npu_compiler_path):
     _compile_option_list = get_common_bishengir_compile_options(metadata)
     if getattr(opt, "enable_tla_mode", False):
         _compile_option_list += ["--enable-triton-kernel-compile=true", "--enable-tla-mode=true"]
+        if _is_a5_target_arch(opt.target_arch) and metadata.get("parallel_mode") == "mix_simd_simt":
+            _compile_option_list.append(f"--shared-mem-dynamic-size={metadata['shared_mem_dynamic_size']}")
         if force_disable_ffts(opt.target_arch):
             _compile_option_list.append("--disable-ffts")
         if _is_ascend_sanitizer_enabled():
