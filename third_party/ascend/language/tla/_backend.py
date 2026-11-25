@@ -18,44 +18,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 """Adapt the Ascend compilation stages for a single TLA compilation."""
-import os
-from types import FunctionType, SimpleNamespace
-
 from triton.backends.ascend import compiler as ascend
 from triton.compiler import compiler as triton_compiler
 
 from ._options import _EXTRA_OPTIONS, normalize_extra_options
-
-
-def _bind(fn, **dependencies):
-    # Each invocation gets its own bindings, including concurrent JIT compilations.
-    bound = FunctionType(fn.__code__, {**fn.__globals__, **dependencies}, fn.__name__, fn.__defaults__, fn.__closure__)
-    bound.__kwdefaults__ = fn.__kwdefaults__
-    return bound
-
-
-def _compile_binary(compiler, module, metadata, options):
-    extra = metadata["tla_compiler_args"]
-    if not extra:
-        return compiler(module, metadata, options)
-
-    def command(argv):
-        if os.path.basename(argv[0]) != "bishengir-compile":
-            raise ValueError(f"TLA compiler arguments require bishengir-compile, got {argv[0]!r}")
-        output = argv.index("-o")
-        return [*argv[:output], *extra, *argv[output:]]
-
-    def run(argv, **kwargs):
-        argv[:] = command(argv)
-        return ascend.subprocess.run(argv, **kwargs)
-
-    def join(argv):
-        return ascend.shlex.join(command(argv))
-
-    # The Ascend stages format the debug command and invoke the compiler separately.
-    stage = _bind(compiler, subprocess=SimpleNamespace(**dict(vars(ascend.subprocess), run=run)),
-                  shlex=SimpleNamespace(**dict(vars(ascend.shlex), join=join)))
-    return stage(module, metadata, options)
 
 
 class _TLABackend(ascend.AscendBackend):
@@ -85,11 +51,7 @@ class _TLABackend(ascend.AscendBackend):
                 ascend.get_dump_manager(metadata["hash"]).put(text, "kernel.ttadapter.mlir", binary=False)
             return text
 
-        compiler = (ascend.linalg_to_bin_enable_npu_compile_910_95
-                    if options.compile_on_910_95 else ascend.linalg_to_bin_enable_npu_compile_A2_A3)
         stages["ttadapter"] = ttadapter
-        stages["npubin"] = ascend._with_debug_line(
-            lambda module, metadata: _compile_binary(compiler, module, metadata, options), options)
 
 
 def make_backend(target):
@@ -97,5 +59,5 @@ def make_backend(target):
 
 
 def compile_tla(src, target=None, options=None, _env_vars=None):
-    compile_one = _bind(triton_compiler.compile, make_backend=make_backend)
-    return compile_one(src, target=target, options=options, _env_vars=_env_vars)
+    return triton_compiler.compile(src, target=target, options=options, _env_vars=_env_vars,
+                                   _backend_factory=make_backend)

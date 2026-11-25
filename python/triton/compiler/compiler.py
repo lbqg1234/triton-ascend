@@ -223,7 +223,7 @@ class CompileTimer:
         )
 
 
-def compile(src, target=None, options=None, _env_vars=None):
+def compile(src, target=None, options=None, _env_vars=None, *, _backend_factory=None):
     compilation_listener = knobs.compilation.listener
     if compilation_listener:
         timer = CompileTimer()
@@ -231,7 +231,7 @@ def compile(src, target=None, options=None, _env_vars=None):
     if target is None:
         target = driver.active.get_current_target()
     assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
-    backend = make_backend(target)
+    backend = (make_backend if _backend_factory is None else _backend_factory)(target)
     ir_source = not isinstance(src, ASTSource)
     # create backend
     if ir_source:

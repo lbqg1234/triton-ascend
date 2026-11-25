@@ -927,6 +927,13 @@ def _save_npuir_debug_output(stdout_bytes: bytes, stderr_bytes: bytes, tmpdir: s
     dump_manager.put(Path(output_path).read_text(encoding='utf-8'), "kernel.npuir.mlir", binary=False)
 
 
+def _vendor_compile_command(compiler_path, input_path, options, output_path, metadata):
+    extra = metadata.get("tla_compiler_args", ())
+    if extra and os.path.basename(compiler_path) != "bishengir-compile":
+        raise ValueError(f"TLA compiler arguments require bishengir-compile, got {compiler_path!r}")
+    return [compiler_path, input_path, *options, *extra, "-o", output_path]
+
+
 def _run_vendor_npubin(cmd, env, opt, metadata, tmpdir, bin_path, *, cv_resources):
     from .block_batching_vendor import classify_vendor_failure, require_candidate_binary
     report = metadata.get("block_batching")
@@ -1246,7 +1253,7 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         _compile_option_list += masked_options
         if npu_compiler_path.endswith("bishengir-compile") and metadata.get("enable_hivm_batch_matmul"):
             _compile_option_list += ["--enable-hivm-batch-matmul"]
-        cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
+        cmd_list = _vendor_compile_command(npu_compiler_path, ttadapter_path, _compile_option_list, bin_file, metadata)
 
         if opt.debug or knobs.autotuning.print:
             print_cmd_list = cmd_list.copy()
@@ -1457,7 +1464,7 @@ def linalg_to_bin_enable_npu_compile_A2_A3(linalg: str, metadata, opt):
         if metadata.get("enable_hivm_batch_matmul"):
             _compile_option_list += ["--enable-hivm-batch-matmul"]
 
-        cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
+        cmd_list = _vendor_compile_command(npu_compiler_path, ttadapter_path, _compile_option_list, bin_file, metadata)
 
         if opt.debug or knobs.autotuning.print:
             print_cmd_list = cmd_list.copy()
