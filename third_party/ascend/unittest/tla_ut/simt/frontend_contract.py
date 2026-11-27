@@ -3,8 +3,11 @@ import pytest
 import triton.language as tl
 from triton.language.extra import tla
 from triton._C.libtriton import ir
+from triton.backends.compiler import GPUTarget
+from triton.language.extra.tla._backend import make_backend
 from triton.language.extra.tla.compiler import check_ttadapter
-from utils.tla_test_utils import compile_offline, lower_offline
+from triton.runtime.jit import MockTensor, create_function_from_signature
+from utils.tla_test_utils import compile_offline, lower_offline, make_context
 
 
 def _ops(module, name):
@@ -23,6 +26,31 @@ def simt_copy(X, Y, BLOCK: tl.constexpr):
     with tla.scope.simt():
         offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         tl.store(Y + offsets, tl.load(X + offsets))
+
+
+@pytest.mark.parametrize("aligned", [True, False])
+def test_simt_jit_preserves_pointer_divisibility(aligned):
+    target = GPUTarget("npu", "Ascend950PR_9589", 32)
+    backend = make_backend(target)
+    source_ptr = MockTensor(tl.float16)
+    source_ptr.data_ptr = lambda: 0x1000 if aligned else 0x1002
+    destination_ptr = MockTensor(tl.float16)
+    binder = create_function_from_signature(simt_copy.signature, simt_copy.params, backend)
+    launch_options = {"compile_mode": "simt_only", "num_warps": 1}
+    bound_args, specialization, options = binder(source_ptr, destination_ptr, 64, **launch_options)
+    options, signature, constexprs, attrs = simt_copy._pack_args(backend, launch_options, bound_args, specialization,
+                                                                 options)
+    source = simt_copy.ASTSource(simt_copy, signature, constexprs, attrs)
+    ctx = make_context()
+    module = source.make_ir(target, options, {}, {}, ctx)
+
+    divisibility = " {tt.divisibility = 16 : i32}"
+    source_attr = divisibility if aligned else ""
+    ttir_signature = next(line for line in module.str_nodebug().splitlines() if "tt.func public" in line)
+    assert f"%arg0: !tt.ptr<f16>{source_attr}, %arg1: !tt.ptr<f16>{divisibility}" in ttir_signature
+    lowered = lower_offline(module, ctx)
+    adapter_signature = next(line for line in lowered.str_nodebug().splitlines() if "func.func" in line)
+    assert f"%arg2: memref<?xf16>{source_attr}, %arg3: memref<?xf16>{divisibility}" in adapter_signature
 
 
 @pytest.mark.parametrize("dtype,backing", [("i1", "i8"), ("i32", "i32"), ("fp16", "f16"), ("bf16", "bf16"),
